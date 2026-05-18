@@ -6,21 +6,27 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/briandowns/spinner"
 	"github.com/fatih/color"
+	"golang.org/x/sync/errgroup"
 
 	"ytgo/internal/archive"
 	"ytgo/internal/config"
 	"ytgo/internal/downloader"
 	"ytgo/internal/extractor"
 	"ytgo/internal/format"
+	"ytgo/internal/limiter"
+	"ytgo/internal/pipeline"
 	"ytgo/internal/postprocessor"
 	"ytgo/internal/subtitle"
 	"ytgo/internal/template"
+	"ytgo/internal/transport"
 )
 
 // Engine runs the full download pipeline.
@@ -28,14 +34,24 @@ type Engine struct {
 	Extractors []extractor.InfoExtractor
 	Downloader *downloader.Downloader
 	Config     config.DownloadOptions
+	Transport  *http.Transport
+	bufPool    *sync.Pool
 }
 
 // NewEngine builds an Engine with default YouTube support.
 func NewEngine(cfg config.DownloadOptions) *Engine {
+	tp := transport.NewTunedTransport()
 	return &Engine{
 		Extractors: []extractor.InfoExtractor{},
-		Downloader: downloader.New(),
-		Config:     cfg,
+		Downloader: &downloader.Downloader{
+			Client:     &http.Client{Transport: tp, Timeout: 0},
+			BufferPool: &sync.Pool{New: func() any { return make([]byte, 32*1024) }},
+			Workers:    cfg.ConcurrentFragments,
+			Limiter:    limiter.NewGlobalLimiter(cfg.LimitRate),
+		},
+		Config:    cfg,
+		Transport: tp,
+		bufPool:   &sync.Pool{New: func() any { return make([]byte, 32*1024) }},
 	}
 }
 
@@ -68,14 +84,23 @@ func (e *Engine) Run(ctx context.Context, rawURL string) error {
 		return fmt.Errorf("extraction failed: %w", err)
 	}
 
+	// Open archive once for single-video runs (playlists open their own)
+	var arch *archive.Archive
+	if e.Config.DownloadArchive != "" && !info.IsPlaylist() {
+		arch, err = archive.Open(e.Config.DownloadArchive)
+		if err != nil {
+			return fmt.Errorf("open archive: %w", err)
+		}
+	}
+
 	if info.IsPlaylist() {
 		return e.runPlaylist(ctx, info)
 	}
 
-	return e.runVideo(ctx, info)
+	return e.runVideo(ctx, info, arch)
 }
 
-func (e *Engine) runVideo(ctx context.Context, info *extractor.VideoInfo) error {
+func (e *Engine) runVideo(ctx context.Context, info *extractor.VideoInfo, arch *archive.Archive) error {
 	// --simulate or --list-formats
 	if e.Config.ListFormats {
 		e.printFormats(info)
@@ -88,30 +113,37 @@ func (e *Engine) runVideo(ctx context.Context, info *extractor.VideoInfo) error 
 		return e.writeSubtitles(ctx, info)
 	}
 
+	task, err := e.downloadVideo(ctx, info, arch)
+	if err != nil {
+		return err
+	}
+	if task == nil {
+		return nil // archived or skipped
+	}
+	return e.postProcessVideo(ctx, task, arch)
+}
+
+// downloadVideo handles archive check, format selection, and downloading.
+// It returns a videoTask for post-processing, or nil if the video was skipped.
+func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, arch *archive.Archive) (*videoTask, error) {
 	isStdout := e.Config.OutputTemplate == "-"
 	if isStdout {
 		e.Config.NoProgress = true
 		e.Config.Quiet = true
 	}
 
-	// Check archive
-	if e.Config.DownloadArchive != "" {
-		arch, err := archive.Open(e.Config.DownloadArchive)
-		if err != nil {
-			return fmt.Errorf("open archive: %w", err)
+	// Check archive (using shared instance if available)
+	if arch != nil && arch.Has(info.ID) {
+		if !e.Config.Quiet {
+			color.Yellow("[%s] %s: has already been recorded in archive", info.ID, info.Title)
 		}
-		if arch.Has(info.ID) {
-			if !e.Config.Quiet {
-				color.Yellow("[%s] %s: has already been recorded in archive", info.ID, info.Title)
-			}
-			return nil
-		}
+		return nil, nil
 	}
 
-	// 3. Format selection
+	// Format selection
 	selected, err := format.Select(e.Config.Format, info.Formats)
 	if err != nil {
-		return fmt.Errorf("format selection failed: %w", err)
+		return nil, fmt.Errorf("format selection failed: %w", err)
 	}
 
 	if e.Config.Verbose {
@@ -121,43 +153,76 @@ func (e *Engine) runVideo(ctx context.Context, info *extractor.VideoInfo) error 
 		}
 	}
 
-	// 4. Download
+	// Download
 	outputPath, err := e.buildOutputPath(info, selected)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	var downloaded []string
-	for i, f := range selected {
-		partPath := outputPath
-		if len(selected) > 1 || isStdout {
-			ext := f.Ext
-			if ext == "" {
-				ext = "mp4"
-			}
-			partPath = fmt.Sprintf("%s.f%s.%s", strings.TrimSuffix(outputPath, filepath.Ext(outputPath)), f.FormatID, ext)
+	// Streaming audio extraction: when -x is set and we have a single audio
+	// format, pipe the download directly into FFmpeg instead of saving an
+	// intermediate file.
+	if e.Config.ExtractAudio && len(selected) == 1 && selected[0].HasAudio && !isStdout {
+		sc := postprocessor.NewStreamConverter(e.Config.FFmpegLocation)
+		if err := sc.ExtractAudio(ctx, e.Downloader.Client, selected[0].URL, outputPath, e.Config.AudioFormat, e.Config.AudioQuality); err != nil {
+			return nil, fmt.Errorf("stream extract audio failed: %w", err)
 		}
+		return &videoTask{info: info, outputPath: outputPath, streamed: true}, nil
+	}
+
+	downloaded := make([]string, len(selected))
+	if len(selected) == 1 {
+		partPath := outputPath
 		if isStdout {
 			partPath = filepath.Join(os.TempDir(), filepath.Base(partPath))
 		}
-
-		if err := e.downloadFormatToFile(ctx, f, partPath, i+1, len(selected)); err != nil {
-			return fmt.Errorf("download format %s failed: %w", f.FormatID, err)
+		if err := e.downloadFormatToFile(ctx, selected[0], partPath, 1, 1); err != nil {
+			return nil, fmt.Errorf("download format %s failed: %w", selected[0].FormatID, err)
 		}
-		downloaded = append(downloaded, partPath)
+		downloaded[0] = partPath
+	} else {
+		var g errgroup.Group
+		for i, f := range selected {
+			i, f := i, f
+			g.Go(func() error {
+				ext := f.Ext
+				if ext == "" {
+					ext = "mp4"
+				}
+				partPath := fmt.Sprintf("%s.f%s.%s", strings.TrimSuffix(outputPath, filepath.Ext(outputPath)), f.FormatID, ext)
+				if isStdout {
+					partPath = filepath.Join(os.TempDir(), filepath.Base(partPath))
+				}
+				if err := e.downloadFormatToFile(ctx, f, partPath, i+1, len(selected)); err != nil {
+					return fmt.Errorf("download format %s failed: %w", f.FormatID, err)
+				}
+				downloaded[i] = partPath
+				return nil
+			})
+		}
+		if err := g.Wait(); err != nil {
+			return nil, err
+		}
 	}
 
-	// 5. Post-processing
+	return &videoTask{info: info, outputPath: outputPath, downloaded: downloaded}, nil
+}
+
+// postProcessVideo handles merge, convert, embed, side files, and archive.
+func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *archive.Archive) error {
+	info := task.info
+	outputPath := task.outputPath
+	downloaded := task.downloaded
+	isStdout := e.Config.OutputTemplate == "-"
+
 	finalPath := outputPath
 	if len(downloaded) > 1 || e.Config.MergeOutputFormat != "" || isStdout {
-		// Need merge or stdout handling
 		merger := postprocessor.NewMerger(e.Config.FFmpegLocation)
 		merged, err := merger.Run(ctx, downloaded, outputPath, e.Config.MergeOutputFormat)
 		if err != nil {
 			return fmt.Errorf("merge failed: %w", err)
 		}
 		finalPath = merged
-		// Clean up parts
 		for _, p := range downloaded {
 			if p != finalPath {
 				os.Remove(p)
@@ -165,7 +230,7 @@ func (e *Engine) runVideo(ctx context.Context, info *extractor.VideoInfo) error 
 		}
 	}
 
-	if e.Config.ExtractAudio {
+	if e.Config.ExtractAudio && !task.streamed {
 		conv := postprocessor.NewConverter(e.Config.FFmpegLocation)
 		converted, err := conv.ExtractAudio(ctx, finalPath, e.Config.AudioFormat, e.Config.AudioQuality)
 		if err != nil {
@@ -198,8 +263,7 @@ func (e *Engine) runVideo(ctx context.Context, info *extractor.VideoInfo) error 
 	}
 
 	// Record in archive
-	if e.Config.DownloadArchive != "" {
-		arch, _ := archive.Open(e.Config.DownloadArchive)
+	if arch != nil {
 		_ = arch.Add(info.ID)
 	}
 
@@ -220,60 +284,160 @@ func (e *Engine) runVideo(ctx context.Context, info *extractor.VideoInfo) error 
 	return nil
 }
 
+// videoTask carries state from the download stage to the post-process stage.
+type videoTask struct {
+	info       *extractor.VideoInfo
+	outputPath string
+	downloaded []string
+	streamed   bool // true if audio was extracted via streaming (no intermediate file)
+}
+
 func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) error {
 	color.Cyan("Playlist: %s (%d entries)", info.PlaylistTitle, len(info.Entries))
-	for i, entry := range info.Entries {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		entry.PlaylistIndex = i + 1
-		entry.PlaylistCount = len(info.Entries)
 
-		// If entry has no formats, re-extract it individually
-		if len(entry.Formats) == 0 && !e.Config.SkipDownload && !e.Config.Simulate {
-			for _, ext := range e.Extractors {
-				if ext.Suitable(entry.OriginalURL) {
-					full, err := ext.Extract(ctx, entry.OriginalURL)
-					if err == nil {
-						full.PlaylistIndex = entry.PlaylistIndex
-						full.PlaylistCount = entry.PlaylistCount
-						full.Playlist = entry.Playlist
-						full.PlaylistID = entry.PlaylistID
-						full.PlaylistTitle = entry.PlaylistTitle
-						info.Entries[i] = full
-						entry = full
-					}
-					break
-				}
-			}
-		}
+	// Apply playlist range filters
+	start := e.Config.PlaylistStart - 1
+	if start < 0 {
+		start = 0
+	}
+	end := len(info.Entries)
+	if e.Config.PlaylistEnd > 0 && e.Config.PlaylistEnd < end {
+		end = e.Config.PlaylistEnd
+	}
+	entries := info.Entries[start:end]
 
-		if err := e.runVideo(ctx, entry); err != nil {
-			if !e.Config.NoWarnings {
-				color.Red("Error downloading %s: %v", entry.Title, err)
-			}
+	// Open archive once and share across workers
+	var arch *archive.Archive
+	if e.Config.DownloadArchive != "" {
+		var err error
+		arch, err = archive.Open(e.Config.DownloadArchive)
+		if err != nil {
+			return fmt.Errorf("open archive: %w", err)
 		}
 	}
-	return nil
+
+	// Channel buffers tasks between download and post-process stages.
+	// Capacity = MaxPostProcessors*2 provides backpressure without blocking
+	// download workers for long.
+	postprocChan := make(chan *videoTask, max(1, e.Config.MaxPostProcessors)*2)
+
+	// Post-process worker pool
+	postprocPool := pipeline.NewWorkerPool(e.Config.MaxPostProcessors)
+	postprocPool.Start(ctx)
+	for i := 0; i < max(1, e.Config.MaxPostProcessors); i++ {
+		postprocPool.Submit(ctx, func() error {
+			for task := range postprocChan {
+				if err := e.postProcessVideo(ctx, task, arch); err != nil {
+					if !e.Config.NoWarnings {
+						color.Red("Error post-processing %s: %v", task.info.Title, err)
+					}
+				}
+			}
+			return nil
+		})
+	}
+
+	// Download worker pool
+	downloadPool := pipeline.NewWorkerPool(e.Config.MaxDownloads)
+	downloadPool.Start(ctx)
+
+	for i, entry := range entries {
+		entry := entry // capture for closure
+		idx := start + i
+
+		if err := downloadPool.Submit(ctx, func() error {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+
+			job := *entry
+			job.PlaylistIndex = idx + 1
+			job.PlaylistCount = len(info.Entries)
+			job.Playlist = entry.Playlist
+			job.PlaylistID = entry.PlaylistID
+			job.PlaylistTitle = entry.PlaylistTitle
+
+			// If entry has no formats, re-extract it individually
+			if len(job.Formats) == 0 && !e.Config.SkipDownload && !e.Config.Simulate {
+				for _, ext := range e.Extractors {
+					if ext.Suitable(job.OriginalURL) {
+						full, err := ext.Extract(ctx, job.OriginalURL)
+						if err == nil {
+							full.PlaylistIndex = job.PlaylistIndex
+							full.PlaylistCount = job.PlaylistCount
+							full.Playlist = job.Playlist
+							full.PlaylistID = job.PlaylistID
+							full.PlaylistTitle = job.PlaylistTitle
+							job = *full
+						}
+						break
+					}
+				}
+			}
+
+			task, err := e.downloadVideo(ctx, &job, arch)
+			if err != nil {
+				if !e.Config.NoWarnings {
+					color.Red("Error downloading %s: %v", job.Title, err)
+				}
+				return nil
+			}
+			if task != nil {
+				select {
+				case postprocChan <- task:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			return nil
+		}); err != nil {
+			// Context cancelled
+			break
+		}
+	}
+
+	// Wait for all downloads to finish, then close the post-proc channel
+	downloadErr := downloadPool.Wait()
+	close(postprocChan)
+	postprocErr := postprocPool.Wait()
+
+	if downloadErr != nil {
+		return downloadErr
+	}
+	return postprocErr
 }
 
 func (e *Engine) downloadFormatToFile(ctx context.Context, f extractor.Format, dest string, current, total int) error {
+	// For concurrent downloads (total > 1), skip the interactive spinner to
+	// avoid stderr interleaving. Instead, log start and completion.
+	concurrent := total > 1
 	var s *spinner.Spinner
-	if !e.Config.Quiet && !e.Config.NoProgress {
+	if !concurrent && !e.Config.Quiet && !e.Config.NoProgress {
 		s = spinner.New(spinner.CharSets[14], 100)
 		s.Suffix = fmt.Sprintf("  Downloading format %s", f.FormatID)
 		s.Start()
 		defer s.Stop()
+	} else if concurrent && !e.Config.Quiet {
+		color.Yellow("[start] format %s → %s", f.FormatID, dest)
+		defer func() {
+			color.Green("[done]  format %s → %s", f.FormatID, dest)
+		}()
 	}
 
-	e.Downloader.Progress = func(down, total int64) {
-		if s != nil && total > 0 {
-			pct := float64(down) / float64(total) * 100
-			s.Suffix = fmt.Sprintf("  Downloading format %s (%.1f%%)", f.FormatID, pct)
-		}
+	// Use a local Downloader instance to avoid race on the Progress callback
+	d := &downloader.Downloader{
+		Client:     e.Downloader.Client,
+		BufferPool: e.Downloader.BufferPool,
+		Workers:    e.Downloader.Workers,
+		Progress: func(down, tot int64) {
+			if s != nil && tot > 0 {
+				pct := float64(down) / float64(tot) * 100
+				s.Suffix = fmt.Sprintf("  Downloading format %s (%.1f%%)", f.FormatID, pct)
+			}
+		},
 	}
 
-	return e.Downloader.DownloadToFile(ctx, f.URL, dest)
+	return d.DownloadToFile(ctx, f.URL, dest)
 }
 
 func (e *Engine) buildOutputPath(info *extractor.VideoInfo, selected []extractor.Format) (string, error) {

@@ -67,6 +67,12 @@ type DownloadOptions struct {
 	ConcurrentFragments int    `mapstructure:"concurrent-fragments"`
 	BufferSize          string `mapstructure:"buffer-size"`
 
+	// Concurrency limits
+	MaxDownloads      int   `mapstructure:"max-downloads"`
+	MaxExtractors     int   `mapstructure:"max-extractors"`
+	MaxPostProcessors int   `mapstructure:"max-postprocessors"`
+	LimitRate         int64 `mapstructure:"limit-rate"` // bytes/sec
+
 	// Post-processing
 	FFmpegLocation string `mapstructure:"ffmpeg-location"`
 
@@ -89,6 +95,9 @@ func DefaultOptions() DownloadOptions {
 		PlaylistStart:       1,
 		ConcurrentFragments: 1,
 		SocketTimeout:       30 * time.Second,
+		MaxDownloads:        3,
+		MaxExtractors:       3,
+		MaxPostProcessors:   2,
 		AudioFormat:         "best",
 		AudioQuality:        "5",
 		FFmpegLocation:      "ffmpeg",

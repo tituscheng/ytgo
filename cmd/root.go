@@ -102,6 +102,12 @@ func init() {
 	// Fragment download
 	rootCmd.Flags().IntP("concurrent-fragments", "N", cfg.ConcurrentFragments, "Number of fragment download threads")
 
+	// Concurrency limits
+	rootCmd.Flags().Int("max-downloads", cfg.MaxDownloads, "Maximum concurrent video downloads")
+	rootCmd.Flags().Int("max-extractors", cfg.MaxExtractors, "Maximum concurrent metadata extractions")
+	rootCmd.Flags().Int("max-postprocessors", cfg.MaxPostProcessors, "Maximum concurrent post-processing jobs")
+	rootCmd.Flags().Int64("limit-rate", cfg.LimitRate, "Maximum download rate in bytes per second")
+
 	// Post-processing
 	rootCmd.Flags().String("ffmpeg-location", cfg.FFmpegLocation, "Path to ffmpeg binary")
 
@@ -171,6 +177,10 @@ func run(cmd *cobra.Command, args []string) error {
 	cfg.Proxy, _ = cmd.Flags().GetString("proxy")
 	cfg.SocketTimeout, _ = cmd.Flags().GetDuration("socket-timeout")
 	cfg.ConcurrentFragments, _ = cmd.Flags().GetInt("concurrent-fragments")
+	cfg.MaxDownloads, _ = cmd.Flags().GetInt("max-downloads")
+	cfg.MaxExtractors, _ = cmd.Flags().GetInt("max-extractors")
+	cfg.MaxPostProcessors, _ = cmd.Flags().GetInt("max-postprocessors")
+	cfg.LimitRate, _ = cmd.Flags().GetInt64("limit-rate")
 	cfg.FFmpegLocation, _ = cmd.Flags().GetString("ffmpeg-location")
 	cfg.Quiet, _ = cmd.Flags().GetBool("quiet")
 	cfg.NoWarnings, _ = cmd.Flags().GetBool("no-warnings")

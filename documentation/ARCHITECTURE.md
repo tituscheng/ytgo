@@ -177,9 +177,9 @@ Returns a slice of `extractor.Format` to download. The engine downloads each for
 
 ### 6. Download Layer (`internal/downloader/`)
 
-**File:** `internal/downloader/downloader.go`
+**Files:** `downloader.go`, `segment.go`, `planner.go`, `resume.go`
 
-A simple HTTP downloader with one key feature: **resume support via `Range` headers.**
+A segmented HTTP downloader with **resume support**, **bounded chunk sizes**, and optional **concurrent segment fetching**.
 
 ```go
 d := downloader.New()
@@ -187,12 +187,13 @@ d.Progress = func(down, total int64) { /* update spinner */ }
 err := d.DownloadToFile(ctx, url, "/path/to/video.mp4")
 ```
 
-- Opens the destination file with `O_APPEND`.
-- If the file already has data, sends a `Range: bytes=N-` header.
-- Parses `Content-Range` to compute total size for progress reporting.
-- 32 KB read buffer.
+- **Bounded chunks:** All requests use `Range: bytes=N-M` with a maximum chunk size of ~10 MB. YouTube's CDN throttles unbounded ranges (`bytes=0-`) to ~32 KB/s on some videos.
+- **Segmented downloads:** Files are split into chunks. With `Workers > 1`, chunks are downloaded concurrently via `errgroup.Group`. With `Workers == 1`, chunks are downloaded sequentially.
+- **Resume support:** A sidecar JSON file tracks completed segments. Interrupted downloads resume from the last missing chunk.
+- **Direct I/O:** `SegmentDownloader` uses `WriteAt` to write chunks directly to the correct file offset without temporary files.
+- **Chunk planning:** `PlanSegments(totalSize, maxWorkers, minChunkSize, maxChunkSize)` balances concurrency against chunk size, never exceeding the 10 MB bound.
 
-**Why not a concurrent fragment downloader (yet)?** YouTube's direct URLs are single-file streams. Fragmented DASH/HLS downloads would need a separate implementation. See `Future.md`.
+**Why bounded chunks?** YouTube's CDN applies different throttling rules based on Range request size. Unbounded or very large (> ~15 MB) ranges are throttled to ~32 KB/s. Bounded chunks ≤ 10 MB stream at full bandwidth. This behavior is video-dependent — some videos allow unbounded ranges, others do not. The bounded-chunk strategy is the safe, universal approach.
 
 ---
 

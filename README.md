@@ -117,7 +117,7 @@ sub-langs:
 | Package | Purpose |
 |---|---|
 | `internal/extractor` | `InfoExtractor` interface |
-| `internal/extractor/youtube` | YouTube innertube client (wraps `kkdai/youtube/v2`) |
+| `internal/extractor/youtube` | YouTube innertube client (custom ANDROID_VR implementation) |
 | `internal/downloader` | HTTP download with `Range` resume |
 | `internal/format` | Format selection DSL parser |
 | `internal/postprocessor` | FFmpeg-based merge/embed/convert |

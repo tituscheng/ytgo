@@ -3,8 +3,9 @@ package youtube
 import (
 	"testing"
 
-	"github.com/kkdai/youtube/v2"
 	"github.com/stretchr/testify/assert"
+
+	"ytgo/internal/extractor/youtube/innertube"
 )
 
 func TestSuitable(t *testing.T) {
@@ -34,7 +35,7 @@ func TestNormalizeLang(t *testing.T) {
 }
 
 func TestMapFormat(t *testing.T) {
-	f := youtube.Format{
+	f := innertube.Format{
 		ItagNo:        22,
 		URL:           "https://example.com/video.mp4",
 		MimeType:      `video/mp4; codecs="avc1.64001F, mp4a.40.2"`,

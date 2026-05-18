@@ -228,6 +228,26 @@ func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) err
 		}
 		entry.PlaylistIndex = i + 1
 		entry.PlaylistCount = len(info.Entries)
+
+		// If entry has no formats, re-extract it individually
+		if len(entry.Formats) == 0 && !e.Config.SkipDownload && !e.Config.Simulate {
+			for _, ext := range e.Extractors {
+				if ext.Suitable(entry.OriginalURL) {
+					full, err := ext.Extract(ctx, entry.OriginalURL)
+					if err == nil {
+						full.PlaylistIndex = entry.PlaylistIndex
+						full.PlaylistCount = entry.PlaylistCount
+						full.Playlist = entry.Playlist
+						full.PlaylistID = entry.PlaylistID
+						full.PlaylistTitle = entry.PlaylistTitle
+						info.Entries[i] = full
+						entry = full
+					}
+					break
+				}
+			}
+		}
+
 		if err := e.runVideo(ctx, entry); err != nil {
 			if !e.Config.NoWarnings {
 				color.Red("Error downloading %s: %v", entry.Title, err)

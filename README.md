@@ -5,9 +5,27 @@ Designed as both a standalone CLI tool and a reusable Go library.
 
 ---
 
+## Why ytgo?
+
+| | ytgo | yt-dlp |
+|---|---|---|
+| **Binary size** | ~11 MB | ~17 MB (needs CPython) |
+| **Cold start** | ~0 ms | ~90 ms (Python interpreter) |
+| **Extraction** | ~0.4 s | ~1.3–2.0 s |
+| **Playlist (15 items)** | ~0.4 s | ~15 s |
+| **Memory (list-formats)** | ~12 MB | ~82 MB |
+| **JS engine** | None required | Required for sig deciphering |
+| **Python runtime** | None required | Required |
+
+ytgo uses a custom **YouTube Innertube client** with the `ANDROID_VR` client profile — it gets direct stream URLs with no JavaScript execution, no signature deciphering, and no `n`-param throttling. The `WEB_EMBEDDED_PLAYER` client provides fallback for age-restricted content.
+
+If you need sponsorblock, 1000+ site extractors, or `--cookies-from-browser`, yt-dlp is still the tool for the job. ytgo is for when you want a fast, light, Go-native YouTube downloader.
+
+---
+
 ## Features
 
-- **YouTube video & playlist extraction** via the Innertube API
+- **YouTube video & playlist extraction** via a custom Innertube client (no JS engine)
 - **Format selection** with yt-dlp-style selectors (`bv*+ba/best`, `best[height<=720]`, itag, extension)
 - **HTTP download** with resume support (`Range` headers) and progress spinners
 - **Post-processing** via FFmpeg: merge, audio extraction, metadata/thumbnail/chapter embedding
@@ -22,13 +40,13 @@ Designed as both a standalone CLI tool and a reusable Go library.
 ## Installation
 
 ```bash
-go install github.com/yourusername/ytgo@latest
+go install github.com/tituscheng/ytgo@latest
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/yourusername/ytgo.git
+git clone https://github.com/tituscheng/ytgo.git
 cd ytgo
 go build -o ytgo .
 ```
@@ -117,7 +135,8 @@ sub-langs:
 | Package | Purpose |
 |---|---|
 | `internal/extractor` | `InfoExtractor` interface |
-| `internal/extractor/youtube` | YouTube innertube client (custom ANDROID_VR implementation) |
+| `internal/extractor/youtube` | YouTube extractor wrapping the custom Innertube client |
+| `internal/extractor/youtube/innertube` | Direct YouTube Innertube API client (ANDROID_VR / WEB_EMBEDDED_PLAYER) |
 | `internal/downloader` | HTTP download with `Range` resume |
 | `internal/format` | Format selection DSL parser |
 | `internal/postprocessor` | FFmpeg-based merge/embed/convert |
@@ -151,6 +170,20 @@ func main() {
     }
 }
 ```
+
+---
+
+## Known Limitations
+
+ytgo is YouTube-only and intentionally lean. Things yt-dlp does that ytgo does **not** yet support:
+
+- **SponsorBlock** — no chapter-based ad skipping
+- **Cookies from browser** — `--cookies-from-browser` is not implemented (cookie files work)
+- **Other sites** — only YouTube (the `InfoExtractor` interface is ready for more)
+- **Throttling bypass** — `ANDROID_VR` avoids most throttling, but edge cases may still occur
+- **Full format selection DSL** — covers the common cases, not every yt-dlp edge case
+
+See [`Future.md`](Future.md) for the roadmap.
 
 ---
 

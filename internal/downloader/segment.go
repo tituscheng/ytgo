@@ -113,8 +113,24 @@ func (sd *SegmentDownloader) DownloadToFile(ctx context.Context, url, destPath s
 	// Determine missing work
 	missing := rs.MissingRanges(segments)
 	if len(missing) == 0 {
-		// Already complete
-		return rs.Remove()
+		// Resume state claims complete, but verify the file actually exists
+		// and is the expected size. The file may have been renamed or deleted
+		// since the resume state was last written (e.g., worker crash).
+		if fileSize(destPath) >= totalSize {
+			return rs.Remove()
+		}
+		// Stale resume state — file missing or incomplete. Reset and re-download.
+		rs = &ResumeState{
+			URL:           url,
+			DestPath:      destPath,
+			FileSize:      totalSize,
+			ContentLength: expectedCL,
+		}
+		if sd.Identity != nil {
+			rs.VideoID = sd.Identity.VideoID
+			rs.FormatID = sd.Identity.FormatID
+		}
+		missing = segments
 	}
 
 	// Pre-allocate destination file

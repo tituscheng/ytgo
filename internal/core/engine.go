@@ -372,7 +372,12 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 	}
 
 	if e.Config.EmbedMetadata || e.Config.EmbedThumbnail || e.Config.EmbedSubs || e.Config.EmbedChapters {
-		embedder := postprocessor.NewEmbedder(e.Config.FFmpegLocation)
+		// Share the engine's tuned transport for thumbnail downloads during embedding.
+		var embedClient *http.Client
+		if e.Transport != nil {
+			embedClient = &http.Client{Transport: e.Transport, Timeout: 30 * time.Second}
+		}
+		embedder := postprocessor.NewEmbedderWithClient(e.Config.FFmpegLocation, embedClient)
 		if err := embedder.Run(ctx, finalPath, info, postprocessor.EmbedOptions{
 			Metadata:  e.Config.EmbedMetadata,
 			Thumbnail: e.Config.EmbedThumbnail,

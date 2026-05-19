@@ -455,3 +455,31 @@ Users who do `ytgo -x --audio-format mp3 URL` on a resumable or rate-limited con
 ---
 
 *Resolution implemented in a single follow-up PR addressing §9 of this re-audit.*
+
+---
+
+## 12. Post-Commit Review Feedback & Follow-up Fixes
+
+After commit `1122554` ("fix: address senior code review findings"), an external senior-level review of the diff was performed. The review was highly positive, describing the work as "exactly how post-review cleanup should look."
+
+### Key Praise
+- **Rate limiter** propagation to `SegmentDownloader.fetchSegment` (via body wrapping with `ThrottleReader`) correctly fixed the headline silent no-op.
+- **Archive durability** (`Add`: disk append before map update) now matches the documented crash-safety contract.
+- **`cleanup.Stack`** snapshot-then-unlock pattern in `Cleanup()` was recognized as the correct technique.
+- HTTP client unification (extraction + side-file thumbnails) and 403 recovery observability were called out as meaningful improvements.
+- The commit message, tight diff (+109/-50), and `-race` cleanliness were specifically commended.
+
+### Remaining Nits Addressed in Follow-up
+| Nit | Action Taken |
+|-----|--------------|
+| Cosmetic stray blank line before `}` in `archive.Add()` | Removed (one-line cleanup). |
+| `Embedder.downloadThumbnail` still created its own ad-hoc `http.Client` | Introduced `NewEmbedderWithClient(ffmpegPath, *http.Client)`. Engine now passes a client built from `e.Transport` when any embed option (`--embed-thumbnail`, etc.) is active. Old `NewEmbedder` path preserved for tests. |
+| Removal of dead networking flags (`--proxy`, `--cookies-from-browser`, etc.) is a breaking change for scripts | Documented in README.md "Known Limitations". The surface was never functional; removal was the correct long-term decision. |
+
+All changes were minimal, preserved backward compatibility for existing call sites and tests, and reuse the existing tuned transport + client construction pattern already established for side-file downloads.
+
+**Verification:** `go build ./... && go test -race ./...` (postprocessor + engine packages specifically re-tested).
+
+This brings the original review findings to a fully resolved state with no remaining mechanical or consistency issues in the areas audited.
+
+*Follow-up fixes committed after `1122554`.*

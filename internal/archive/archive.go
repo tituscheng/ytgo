@@ -83,5 +83,4 @@ func (a *Archive) Add(id string) error {
 	}
 	a.entries[id] = true
 	return nil
-
 }

@@ -176,11 +176,21 @@ type EmbedOptions struct {
 // Embedder embeds metadata, thumbnails, subtitles and chapters.
 type Embedder struct {
 	ffmpeg string
+	client *http.Client // optional; if set, used for thumbnail downloads (shares tuned transport)
 }
 
-// NewEmbedder creates an Embedder.
+// NewEmbedder creates an Embedder using a default short-lived HTTP client for thumbnails.
 func NewEmbedder(ffmpegPath string) *Embedder {
 	return &Embedder{ffmpeg: findFFmpeg(ffmpegPath)}
+}
+
+// NewEmbedderWithClient creates an Embedder that reuses the provided HTTP client
+// (typically one built from the engine's tuned transport) for thumbnail downloads.
+func NewEmbedderWithClient(ffmpegPath string, client *http.Client) *Embedder {
+	return &Embedder{
+		ffmpeg: findFFmpeg(ffmpegPath),
+		client: client,
+	}
 }
 
 // Run embeds the requested items into the media file.
@@ -257,10 +267,16 @@ func (e *Embedder) downloadThumbnail(ctx context.Context, thumbs []extractor.Thu
 	if err != nil {
 		return "", err
 	}
-	// Use a dedicated client with timeout for thumbnail fetch during embed.
-	// (The main download path and side-file thumbnails now share the tuned transport.)
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+
+	// Use the injected client (preferred — shares engine's tuned transport) or fall back
+	// to a short-lived default. This unifies behavior with side-file thumbnail downloads.
+	var c *http.Client
+	if e.client != nil {
+		c = e.client
+	} else {
+		c = &http.Client{Timeout: 30 * time.Second}
+	}
+	resp, err := c.Do(req)
 	if err != nil {
 		return "", err
 	}

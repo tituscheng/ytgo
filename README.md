@@ -415,7 +415,7 @@ info, err := api.Extract(ctx, api.ExtractOptions{
 ytgo is YouTube-only and intentionally lean. Things yt-dlp does that ytgo does **not** yet support:
 
 - **SponsorBlock** — no chapter-based ad skipping
-- **Cookies from browser** — `--cookies-from-browser` is not implemented (cookie files work)
+- **Cookies from browser** — browser cookie extraction was never wired; the `--cookies-from-browser` (and related networking) flags have been removed. Cookie file support via the library API remains available for authenticated scenarios.
 - **Other sites** — only YouTube (the `InfoExtractor` interface is ready for more)
 - **Throttling bypass** — bounded chunk downloading handles most throttling; `ANDROID_VR` avoids signature-based throttling
 - **String regex filters** — ytgo uses type-safe preference scoring and Go filter functions instead

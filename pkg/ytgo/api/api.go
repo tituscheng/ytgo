@@ -28,17 +28,37 @@ func Download(ctx context.Context, url string, opts DownloadOptions) error {
 	return engine.Run(ctx, url)
 }
 
+// ExtractOptions configures metadata extraction without downloading.
+type ExtractOptions struct {
+	URL     string
+	Timeout time.Duration
+	Enrich  bool // if true, makes secondary API calls for additional metadata (e.g. LikeCount)
+}
+
+// Extract extracts metadata without downloading.
+// Use ExtractOptions.Enrich to enable secondary API calls for richer metadata.
+func Extract(ctx context.Context, opts ExtractOptions) (*ytgo.VideoInfo, error) {
+	ext := youtube.NewExtractor(opts.Timeout)
+	ext.Enrich = opts.Enrich
+	return ext.Extract(ctx, opts.URL)
+}
+
 // ExtractOnly extracts metadata without downloading.
+// It is a convenience wrapper around Extract with Enrich disabled.
 func ExtractOnly(ctx context.Context, url string, timeout time.Duration) (*ytgo.VideoInfo, error) {
-	ext := youtube.NewExtractor(timeout)
-	return ext.Extract(ctx, url)
+	return Extract(ctx, ExtractOptions{URL: url, Timeout: timeout})
 }
 
 // GetStreamOptions configures a stream URL resolution.
 type GetStreamOptions struct {
-	URL     string
-	Format  string        // format selector, default "best"
-	Timeout time.Duration // default 30s
+	URL              string
+	Format           string        // format selector, default "best"
+	Timeout          time.Duration // default 30s
+	Enrich           bool          // if true, makes secondary API calls for additional metadata
+	PreferVideoCodec string        // boosts score for matching video codecs
+	PreferAudioCodec string        // boosts score for matching audio codecs
+	PreferContainer  string        // boosts score for matching container extensions
+	FormatFilter     ytgo.FormatFilter
 }
 
 // StreamResult holds a resolved stream URL with full metadata.
@@ -63,12 +83,20 @@ func GetStreamURL(ctx context.Context, opts GetStreamOptions) (*StreamResult, er
 	}
 
 	ext := youtube.NewExtractor(opts.Timeout)
+	ext.Enrich = opts.Enrich
 	info, err := ext.Extract(ctx, opts.URL)
 	if err != nil {
 		return nil, fmt.Errorf("extract failed: %w", err)
 	}
 
-	formats, err := format.Select(opts.Format, info.Formats)
+	formats, err := format.SelectWithOptions(opts.Format, info.Formats, format.SelectOptions{
+		Preferences: format.Preferences{
+			PreferVideoCodec: opts.PreferVideoCodec,
+			PreferAudioCodec: opts.PreferAudioCodec,
+			PreferContainer:  opts.PreferContainer,
+		},
+		FormatFilter: opts.FormatFilter,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("format selection: %w", err)
 	}

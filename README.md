@@ -154,7 +154,7 @@ For multi-format downloads (`bv+ba`), progress is **automatically aggregated** a
 Resolve a temporary direct stream URL without downloading:
 
 ```go
-result, err := api.GetStreamURL(ctx, api.GetStreamURL{
+result, err := api.GetStreamURL(ctx, api.GetStreamOptions{
     URL:    "https://www.youtube.com/watch?v=...",
     Format: "best[height<=1080]",
 })
@@ -165,6 +165,19 @@ if err != nil {
 // result.URL       → direct playable URL
 // result.Format    → full format metadata (codec, resolution, etc.)
 // result.VideoInfo → full video metadata (title, thumbnail, etc.)
+
+// With preferences and metadata enrichment:
+result, err = api.GetStreamURL(ctx, api.GetStreamOptions{
+    URL:              videoURL,
+    Format:           "best",
+    Enrich:           true,              // fetch LikeCount via secondary API call
+    PreferVideoCodec: "avc1",            // boost H.264 score
+    PreferAudioCodec: "mp4a",            // boost AAC score
+    PreferContainer:  "mp4",             // boost MP4 score
+    FormatFilter: func(f ytgo.Format) bool {
+        return f.HasVideo && f.HasAudio // only combined formats
+    },
+})
 ```
 
 This is better than yt-dlp's `--get-url` raw string because you get structured format and video metadata alongside the URL.
@@ -352,6 +365,21 @@ result, err := api.GetStreamURL(ctx, api.GetStreamOptions{
 // result.URL → stream URL
 // result.Format.VideoCodec → "avc1.640028"
 // result.VideoInfo.Title → "Video Title"
+```
+
+### Extract metadata only
+
+```go
+// Basic extraction (fast, single API call)
+info, err := api.ExtractOnly(ctx, videoURL, 30*time.Second)
+
+// Enriched extraction (slower, includes LikeCount)
+info, err := api.Extract(ctx, api.ExtractOptions{
+    URL:     videoURL,
+    Timeout: 30 * time.Second,
+    Enrich:  true,
+})
+// info.LikeCount → 12345
 ```
 
 ---

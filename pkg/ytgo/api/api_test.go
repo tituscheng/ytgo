@@ -49,6 +49,45 @@ func TestGetStreamOptionsDefaults(t *testing.T) {
 	// The function fills in defaults internally
 }
 
+func TestExtractOptions(t *testing.T) {
+	// Verify ExtractOptions struct fields exist and are accessible
+	opts := ExtractOptions{
+		URL:     "https://example.com/watch?v=test",
+		Timeout: 10 * time.Second,
+		Enrich:  true,
+	}
+	assert.Equal(t, "https://example.com/watch?v=test", opts.URL)
+	assert.Equal(t, 10*time.Second, opts.Timeout)
+	assert.True(t, opts.Enrich)
+}
+
+func TestExtractOnlyBackwardCompatibility(t *testing.T) {
+	// ExtractOnly is a thin wrapper — it should error on an invalid URL just like before
+	_, err := ExtractOnly(context.Background(), "not-a-valid-url", 5*time.Second)
+	require.Error(t, err)
+}
+
+func TestGetStreamURLWithPreferences(t *testing.T) {
+	// Verify GetStreamOptions supports the new preference fields
+	opts := GetStreamOptions{
+		URL:              "https://example.com/watch?v=test",
+		Format:           "best",
+		Timeout:          5 * time.Second,
+		Enrich:           true,
+		PreferVideoCodec: "avc1",
+		PreferAudioCodec: "mp4a",
+		PreferContainer:  "mp4",
+		FormatFilter: func(f ytgo.Format) bool {
+			return f.HasVideo && f.HasAudio
+		},
+	}
+	assert.Equal(t, "avc1", opts.PreferVideoCodec)
+	assert.Equal(t, "mp4a", opts.PreferAudioCodec)
+	assert.Equal(t, "mp4", opts.PreferContainer)
+	assert.NotNil(t, opts.FormatFilter)
+	assert.True(t, opts.Enrich)
+}
+
 // mockExtractor is a test extractor that returns canned data.
 type mockExtractor struct {
 	info *ytgo.VideoInfo

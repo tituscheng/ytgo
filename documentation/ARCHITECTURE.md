@@ -52,7 +52,8 @@ Both paths converge on `core.Engine.Run()`, which is the single entry point for 
 
 - Re-exports `config.DownloadOptions` as `api.DownloadOptions`.
 - `api.Download(ctx, url, opts)` — one-shot download.
-- `api.ExtractOnly(ctx, url, timeout)` — metadata extraction without downloading.
+- `api.Extract(ctx, opts)` — metadata extraction with `ExtractOptions` (supports enrichment).
+- `api.ExtractOnly(ctx, url, timeout)` — convenience wrapper for basic metadata extraction.
 
 **Why a separate package?** `pkg/` is the conventional Go location for public library surface. Internal packages can still change; `pkg/ytgo/api` is the stability contract.
 

@@ -26,8 +26,12 @@ type WorkerPool struct {
 }
 
 // NewWorkerPool creates a WorkerPool that runs at most 'limit' goroutines
-// concurrently. A limit <= 0 means unlimited concurrency.
+// concurrently. A limit <= 0 means unlimited concurrency. Negative values
+// are clamped to 0 so misconfiguration cannot panic make(chan).
 func NewWorkerPool(limit int) *WorkerPool {
+	if limit < 0 {
+		limit = 0
+	}
 	return &WorkerPool{
 		limit: limit,
 		sem:   make(chan struct{}, limit),

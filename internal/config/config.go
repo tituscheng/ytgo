@@ -44,12 +44,10 @@ type DownloadOptions struct {
 	EmbedChapters    bool `mapstructure:"embed-chapters"`
 
 	// Download behaviour
-	SkipDownload      bool   `mapstructure:"skip-download"`
-	DownloadArchive   string `mapstructure:"download-archive"`
-	ForceWriteArchive bool   `mapstructure:"force-write-archive"`
-	NoOverwrites      bool   `mapstructure:"no-overwrites"`
-	ContinuePartial   bool   `mapstructure:"continue"`
-	NoContinue        bool   `mapstructure:"no-continue"`
+	SkipDownload    bool   `mapstructure:"skip-download"`
+	DownloadArchive string `mapstructure:"download-archive"`
+	NoOverwrites    bool   `mapstructure:"no-overwrites"`
+	ContinuePartial bool   `mapstructure:"continue"`
 
 	// Audio extraction
 	ExtractAudio bool   `mapstructure:"extract-audio"`
@@ -59,15 +57,12 @@ type DownloadOptions struct {
 
 	// Merging / remux
 	MergeOutputFormat string `mapstructure:"merge-output-format"`
-	RemuxVideo        string `mapstructure:"remux-video"`
-	RecodeVideo       string `mapstructure:"recode-video"`
 
 	// Playlist
-	YesPlaylist   bool   `mapstructure:"yes-playlist"`
-	NoPlaylist    bool   `mapstructure:"no-playlist"`
-	PlaylistStart int    `mapstructure:"playlist-start"`
-	PlaylistEnd   int    `mapstructure:"playlist-end"`
-	PlaylistItems string `mapstructure:"playlist-items"`
+	YesPlaylist   bool `mapstructure:"yes-playlist"`
+	NoPlaylist    bool `mapstructure:"no-playlist"`
+	PlaylistStart int  `mapstructure:"playlist-start"`
+	PlaylistEnd   int  `mapstructure:"playlist-end"`
 
 	// Network / auth
 	CookiesFromBrowser string        `mapstructure:"cookies-from-browser"`
@@ -78,8 +73,7 @@ type DownloadOptions struct {
 	SocketTimeout      time.Duration `mapstructure:"socket-timeout"`
 
 	// Fragment download
-	ConcurrentFragments int    `mapstructure:"concurrent-fragments"`
-	BufferSize          string `mapstructure:"buffer-size"`
+	ConcurrentFragments int `mapstructure:"concurrent-fragments"`
 
 	// Concurrency limits
 	MaxDownloads      int   `mapstructure:"max-downloads"`
@@ -98,6 +92,8 @@ type DownloadOptions struct {
 
 	// OnError is called for every video that fails during processing.
 	// Library/CLI code sets it directly; not configurable via config file.
+	// Calls are serialized by the engine, so user code does not need its
+	// own mutex when mutating shared state from this callback.
 	OnError func(ytgo.DownloadFailure) `mapstructure:"-"`
 
 	// Logger is an optional structured logger for library use.

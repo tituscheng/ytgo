@@ -92,15 +92,12 @@ func init() {
 
 	// Merge / remux
 	rootCmd.Flags().String("merge-output-format", "", "Merge output format (mp4, mkv, etc.)")
-	rootCmd.Flags().String("remux-video", "", "Remux video to another container")
-	rootCmd.Flags().String("recode-video", "", "Recode video to another format")
 
 	// Playlist
 	rootCmd.Flags().Bool("yes-playlist", true, "Download playlist")
 	rootCmd.Flags().Bool("no-playlist", false, "Download single video only")
 	rootCmd.Flags().Int("playlist-start", cfg.PlaylistStart, "Playlist start index")
 	rootCmd.Flags().Int("playlist-end", 0, "Playlist end index")
-	rootCmd.Flags().String("playlist-items", "", "Playlist items to download")
 
 	// Network / auth
 	rootCmd.Flags().String("cookies-from-browser", "", "Browser to extract cookies from")

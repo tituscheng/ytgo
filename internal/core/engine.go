@@ -40,6 +40,8 @@ type Engine struct {
 	Downloader *downloader.Downloader
 	Config     config.DownloadOptions
 	Transport  *http.Transport
+
+	onErrorMu sync.Mutex
 }
 
 // progressAggregate sums per-format download progress into a single callback.
@@ -232,26 +234,6 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 		}
 	}
 
-	// Streaming audio extraction: when -x is set and we have a single audio
-	// format, pipe the download directly into FFmpeg instead of saving an
-	// intermediate file.
-	if e.Config.ExtractAudio && len(selected) == 1 && selected[0].HasAudio && !isStdout {
-		sc := postprocessor.NewStreamConverter(e.Config.FFmpegLocation, e.Downloader)
-		if err := sc.ExtractAudio(ctx, e.Downloader.Client, selected[0].URL, outputPath, e.Config.AudioFormat, e.Config.AudioQuality); err != nil {
-			e.reportFailure(ytgo.DownloadFailure{
-				VideoID:   info.ID,
-				Title:     info.Title,
-				URL:       info.OriginalURL,
-				FormatID:  selected[0].FormatID,
-				Stage:     "convert",
-				Error:     err.Error(),
-				Retryable: false,
-			})
-			return nil, fmt.Errorf("stream extract audio failed: %w", err)
-		}
-		return &videoTask{info: info, outputPath: outputPath, streamed: true}, nil
-	}
-
 	downloaded := make([]string, len(selected))
 
 	// Set up progress aggregation when the caller provides a callback and
@@ -369,7 +351,7 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 		}
 	}
 
-	if e.Config.ExtractAudio && !task.streamed {
+	if e.Config.ExtractAudio {
 		conv := postprocessor.NewConverter(e.Config.FFmpegLocation)
 		converted, err := conv.ExtractAudio(ctx, finalPath, e.Config.AudioFormat, e.Config.AudioQuality)
 		if err != nil {
@@ -442,7 +424,6 @@ type videoTask struct {
 	info       *extractor.VideoInfo
 	outputPath string
 	downloaded []string
-	streamed   bool // true if audio was extracted via streaming (no intermediate file)
 }
 
 func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) (*ytgo.PlaylistReport, error) {
@@ -703,10 +684,14 @@ func isRetryable(err error) bool {
 }
 
 // reportFailure calls the user-configured OnError callback if set.
+// Calls are serialized so user code does not need its own mutex.
 func (e *Engine) reportFailure(f ytgo.DownloadFailure) {
-	if e.Config.OnError != nil {
-		e.Config.OnError(f)
+	if e.Config.OnError == nil {
+		return
 	}
+	e.onErrorMu.Lock()
+	defer e.onErrorMu.Unlock()
+	e.Config.OnError(f)
 }
 
 // log emits a structured debug log if a logger is configured.

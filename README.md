@@ -159,6 +159,7 @@ For single videos, `api.Download()` returns the error directly. For playlists, p
 opts := api.DefaultOptions()
 var failures []ytgo.DownloadFailure
 opts.OnError = func(f ytgo.DownloadFailure) {
+    // Calls are serialized by the engine — no caller-side mutex needed.
     failures = append(failures, f)
     log.Printf("Failed [%s] at stage %s: %s (retryable: %v)",
         f.VideoID, f.Stage, f.Error, f.Retryable)

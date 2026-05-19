@@ -42,6 +42,9 @@ func NewSegmentDownloader(client *http.Client) *SegmentDownloader {
 // DownloadToFile fetches url and writes it to destPath using segmented
 // downloads. When Workers == 1, segments are downloaded sequentially.
 func (sd *SegmentDownloader) DownloadToFile(ctx context.Context, url, destPath string) error {
+	if sd.Workers < 1 {
+		sd.Workers = 1
+	}
 	// Probe server capabilities
 	totalSize, supportsRange, err := sd.probe(ctx, url)
 	sd.totalSize = totalSize
@@ -141,14 +144,21 @@ func (sd *SegmentDownloader) DownloadToFile(ctx context.Context, url, destPath s
 			_ = rs.Save() // periodic save
 		}
 	} else {
-		// Bounded concurrency via semaphore
+		// Bounded concurrency via semaphore. The send is wrapped in a select
+		// so context cancellation never blocks the launch loop (mirrors
+		// pipeline.WorkerPool.Submit).
 		sem := make(chan struct{}, sd.Workers)
 		var eg errgroup.Group
 		var completedMu sync.Mutex
 
+	launch:
 		for _, seg := range missing {
 			seg := seg
-			sem <- struct{}{}
+			select {
+			case <-ctx.Done():
+				break launch
+			case sem <- struct{}{}:
+			}
 			eg.Go(func() error {
 				defer func() { <-sem }()
 				if err := sd.fetchSegment(ctx, url, seg, fd, &downloaded); err != nil {
@@ -165,6 +175,10 @@ func (sd *SegmentDownloader) DownloadToFile(ctx context.Context, url, destPath s
 		if downloadErr := eg.Wait(); downloadErr != nil {
 			_ = rs.Save()
 			return fmt.Errorf("segment download failed: %w", downloadErr)
+		}
+		if err := ctx.Err(); err != nil {
+			_ = rs.Save()
+			return err
 		}
 	}
 

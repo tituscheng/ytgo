@@ -12,12 +12,14 @@ Designed as both a standalone CLI tool and a reusable Go library.
 | **Binary size** | ~11 MB | ~17 MB (needs CPython) |
 | **Cold start** | ~0 ms | ~90 ms (Python interpreter) |
 | **Extraction** | ~0.4 s | ~1.3–2.0 s |
+| **Download (audio, 65 MB)** | ~4 s | ~6 s |
+| **Download (video+audio, 1 GB)** | ~68 s | ~82 s |
 | **Playlist (15 items)** | ~0.4 s | ~15 s |
 | **Memory (list-formats)** | ~12 MB | ~82 MB |
 | **JS engine** | None required | Required for sig deciphering |
 | **Python runtime** | None required | Required |
 
-ytgo uses a custom **YouTube Innertube client** with the `ANDROID_VR` client profile — it gets direct stream URLs with no JavaScript execution, no signature deciphering, and no `n`-param throttling. The `WEB_EMBEDDED_PLAYER` client provides fallback for age-restricted content.
+ytgo uses a custom **YouTube Innertube client** with the `ANDROID_VR` client profile — it gets direct stream URLs with no JavaScript execution and no signature deciphering. Downloads use **bounded 10 MB chunk segmentation** to bypass YouTube CDN throttling, achieving full bandwidth speeds (~20+ MB/s) even on formats that would otherwise drop to ~32 KB/s. The `WEB_EMBEDDED_PLAYER` client provides fallback for age-restricted content.
 
 If you need sponsorblock, 1000+ site extractors, or `--cookies-from-browser`, yt-dlp is still the tool for the job. ytgo is for when you want a fast, light, Go-native YouTube downloader.
 
@@ -27,7 +29,7 @@ If you need sponsorblock, 1000+ site extractors, or `--cookies-from-browser`, yt
 
 - **YouTube video & playlist extraction** via a custom Innertube client (no JS engine)
 - **Format selection** with yt-dlp-style selectors (`bv*+ba/best`, `best[height<=720]`, itag, extension)
-- **HTTP download** with resume support (`Range` headers) and progress spinners
+- **HTTP download** with bounded chunk segmentation (~10 MB), concurrent workers, resume support, and progress spinners
 - **Post-processing** via FFmpeg: merge, audio extraction, metadata/thumbnail/chapter embedding
 - **Subtitles**: download manual & auto-generated captions, convert JSON3 → SRT/VTT
 - **Output templates**: `%(title)s`, `%(upload_date>%Y-%m-%d)s`, `%(playlist_index)s`, etc.
@@ -137,7 +139,9 @@ sub-langs:
 | `internal/extractor` | `InfoExtractor` interface |
 | `internal/extractor/youtube` | YouTube extractor wrapping the custom Innertube client |
 | `internal/extractor/youtube/innertube` | Direct YouTube Innertube API client (ANDROID_VR / WEB_EMBEDDED_PLAYER) |
-| `internal/downloader` | HTTP download with `Range` resume |
+| `internal/downloader` | HTTP download with bounded chunk segmentation, concurrent workers, and resume |
+| `internal/limiter` | Global rate limiter for downloads |
+| `internal/pipeline` | Concurrent worker pool for extract/postprocess |
 | `internal/format` | Format selection DSL parser |
 | `internal/postprocessor` | FFmpeg-based merge/embed/convert |
 | `internal/subtitle` | Subtitle fetch & JSON3→SRT/VTT conversion |
@@ -180,7 +184,7 @@ ytgo is YouTube-only and intentionally lean. Things yt-dlp does that ytgo does *
 - **SponsorBlock** — no chapter-based ad skipping
 - **Cookies from browser** — `--cookies-from-browser` is not implemented (cookie files work)
 - **Other sites** — only YouTube (the `InfoExtractor` interface is ready for more)
-- **Throttling bypass** — `ANDROID_VR` avoids most throttling, but edge cases may still occur
+- **Throttling bypass** — bounded chunk downloading handles most throttling; `ANDROID_VR` avoids signature-based throttling
 - **Full format selection DSL** — covers the common cases, not every yt-dlp edge case
 
 See [`Future.md`](Future.md) for the roadmap.

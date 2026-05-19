@@ -337,7 +337,32 @@ For playlists: begin extracting the next batch of entries while the current batc
 
 ---
 
-## Appendix: Architecture Diagram
+## Appendix A: Deferred Plans
+
+### Hybrid n-sig / Signature Cipher Solver
+
+**Status:** ⏸️ Deferred — not currently needed.
+
+**Original plan:** A native Go signature cipher solver + Node.js n-sig worker to handle YouTube's JavaScript challenge solving, similar to yt-dlp's approach.
+
+**Why it was deferred:**
+After implementing bounded chunk downloading, we discovered that the throttling was **not** caused by missing n-sig solving. The actual root cause was YouTube's CDN throttling unbounded `Range: bytes=0-` requests. The bounded chunk fix achieves full download speed (~16 MB/s) without any JavaScript runtime.
+
+**Current evidence we don't need it:**
+- The ANDROID_VR client returns pre-signed direct URLs with no `n` parameter
+- yt-dlp on this machine also skips n-sig solving (Deno/EJS components unavailable) yet downloads successfully via the same ANDROID_VR client
+- All tested videos (normal and long-form) download at full speed with bounded chunks alone
+
+**When to revisit:**
+- If YouTube changes ANDROID_VR to return URLs requiring signature deciphering
+- If age-restricted videos (WEB_EMBEDDED_PLAYER fallback) fail or throttle due to ciphered formats
+- If a specific video is found that requires n-sig solving even with bounded chunks
+
+**Plan location:** `~/.kimi/plans/taskmaster-valkyrie-superboy.md` (approved, implementation-ready)
+
+---
+
+## Appendix B: Architecture Diagram
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐

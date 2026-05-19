@@ -270,7 +270,7 @@ func (e *Embedder) Run(ctx context.Context, path string, info *extractor.VideoIn
 	if opts.Thumbnail && len(info.Thumbnails) > 0 {
 		thumbPath, err := e.downloadThumbnail(ctx, info.Thumbnails)
 		if err == nil {
-			defer os.Remove(thumbPath)
+			defer removeFile(thumbPath)
 			args = append(args, "-i", thumbPath, "-map", "0", "-map", "1", "-c", "copy", "-disposition:v:1", "attached_pic")
 		}
 	}
@@ -279,7 +279,7 @@ func (e *Embedder) Run(ctx context.Context, path string, info *extractor.VideoIn
 	if opts.Chapters && len(info.Chapters) > 0 {
 		metaFile, err := writeChaptersMetadata(info.Chapters)
 		if err == nil {
-			defer os.Remove(metaFile)
+			defer removeFile(metaFile)
 			args = append(args, "-i", metaFile, "-map_metadata", "1")
 		}
 	}
@@ -294,11 +294,11 @@ func (e *Embedder) Run(ctx context.Context, path string, info *extractor.VideoIn
 	args = append(args, tmpPath)
 
 	if err := runFFmpeg(ctx, e.ffmpeg, e.prefix, args...); err != nil {
-		os.Remove(tmpPath)
+		removeFile(tmpPath)
 		return fmt.Errorf("ffmpeg embed: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
+		removeFile(tmpPath)
 		return fmt.Errorf("rename: %w", err)
 	}
 	return nil
@@ -347,7 +347,7 @@ func (e *Embedder) downloadThumbnail(ctx context.Context, thumbs []extractor.Thu
 	path := f.Name()
 	if _, err := io.Copy(f, resp.Body); err != nil {
 		f.Close()
-		os.Remove(path)
+		removeFile(path)
 		return "", err
 	}
 	f.Close()
@@ -371,4 +371,11 @@ func writeChaptersMetadata(chapters []extractor.Chapter) (string, error) {
 		fmt.Fprintf(f, "title=%s\n", ch.Title)
 	}
 	return f.Name(), nil
+}
+
+// removeFile is a best-effort cleanup for temporary post-processing artifacts
+// (thumbnails, metadata sidecars, failed .tmp outputs). Errors are ignored
+// because these are non-critical temp files (typically in /tmp).
+func removeFile(path string) {
+	_ = os.Remove(path)
 }

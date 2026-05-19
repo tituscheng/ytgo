@@ -46,7 +46,8 @@ func (e *Extractor) Suitable(rawURL string) bool {
 		return false
 	}
 	host := strings.ToLower(u.Hostname())
-	return strings.HasSuffix(host, "youtube.com") || host == "youtu.be"
+	// Exact domain + proper subdomain check (prevents notyoutube.com, fakeyoutube.com, etc.).
+	return host == "youtube.com" || strings.HasSuffix(host, ".youtube.com") || host == "youtu.be"
 }
 
 // Extract fetches metadata for the given YouTube URL.

@@ -39,6 +39,12 @@ func TestSanitize(t *testing.T) {
 	assert.Equal(t, "My-Video", sanitize("My/Video"))
 	assert.Equal(t, "My-Video", sanitize("My\\Video"))
 	assert.Equal(t, "My-Video", sanitize("My:Video"))
+	// Path traversal protection (Issue 2)
+	assert.Equal(t, "Video", sanitize("..Video"))
+	assert.Equal(t, "Video", sanitize("Video.."))
+	assert.Equal(t, "Par_ent", sanitize("Par..ent")) // internal .. becomes single _
+	assert.Equal(t, "Video", sanitize("...Video..."))
+	assert.Equal(t, "Video", sanitize(".Video."))
 }
 
 func TestBuildPath(t *testing.T) {

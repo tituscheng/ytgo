@@ -535,3 +535,33 @@ All changes followed the project's established principles:
 These fixes close the last major classes of issues identified in the external review and bring ytgo to a significantly stronger position for production playlist workloads.
 
 *All fixes committed together after documentation updates.*
+
+---
+
+## 14. Follow-up Critical Review — stdout, Path Traversal, and Suitable() Hardening
+
+After the reliability hardening pass (§13), a subsequent external review surfaced two **critical** issues that had survived prior audits, plus one regression from our own Suitable() change, and several low-severity consistency notes.
+
+### High-Severity Issues Resolved
+
+| # | Issue | Status | Resolution |
+|---|-------|--------|------------|
+| 1 | **stdout mode completely broken** (`-o -`): `downloaded[]` pointed to `finalPath` while data lived in `partPath`; no rename occurred in stdout branch. Post-processing and final copy-to-stdout would fail with "file not found". | Critical | Removed the `if !isStdout` guard around `os.Rename(partPath, finalPath)`. Rename now always happens. `downloaded[]` and the later stdout copy path now always see real files. Both single-format and multi-format (concurrent) branches fixed. Minimal change that makes all downstream logic honest. |
+| 2 | **Path traversal vulnerability** in `sanitize()`: `..` was never stripped, allowing a malicious title to produce `filepath.Join(base, "..")` and escape the output directory. | Critical | Added `strings.ReplaceAll(name, "..", "_")` + `strings.Trim(name, ". _")` inside `sanitize()`. Also updated tests. Follows the existing "sanitize early" philosophy. |
+| 3 | **Suitable() still too loose**: `HasSuffix(host, "youtube.com")` matched `fakeyoutube.com`, `notyoutube.com`, etc. | Medium (regression from prior fix) | Changed to the correct exact-domain check: `host == "youtube.com" || strings.HasSuffix(host, ".youtube.com") || host == "youtu.be"`. |
+
+### Low-Severity Polish Applied
+
+- Replaced all bare `os.Remove(...)` calls in `postprocessor.go` (thumbnail temp, chapters metadata, embed `.tmp` files, failed thumbnail downloads) with a small private `removeFile()` best-effort helper for consistency with the `cleanupFile` pattern introduced in the engine.
+- Hardened `isTransientInnertubeError`: introduced a small typed `*innertubeStatusError` returned by `doPostJSON`. The retry predicate now prefers `errors.As` on the typed error (checking 429/5xx statuses) and keeps only a lightweight fallback string match. Eliminates the fragility the reviewer correctly identified.
+
+### Design Notes
+
+- All fixes were deliberately minimal and reused existing patterns (atomic rename, early sanitization, typed errors + `errors.As`).
+- No behavior change for normal (non-stdout) downloads.
+- New unit test coverage added for the `..` sanitization cases.
+- Full verification: `go build ./... && go test -race -count=1 ./...` (including the slow Innertube suite).
+
+This round closes the last known critical correctness and security gaps identified across the external review process. The combination of the three review cycles (original architecture, production readiness, reliability, and this follow-up) has produced a markedly more robust codebase.
+
+*Fixes committed after documentation updates.*

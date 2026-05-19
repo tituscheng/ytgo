@@ -192,13 +192,14 @@ func (c *Client) doPostJSON(ctx context.Context, endpoint string, body any) ([]b
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, &innertubeStatusError{status: resp.StatusCode, body: string(bodyBytes)}
 	}
 
 	return io.ReadAll(resp.Body)
 }
 
 // isTransientInnertubeError decides whether a postJSON error is worth retrying.
+// It prefers typed status errors over fragile string matching.
 func isTransientInnertubeError(err error) bool {
 	if err == nil {
 		return false
@@ -209,14 +210,34 @@ func isTransientInnertubeError(err error) bool {
 		return true
 	}
 
-	// Check status codes embedded in the error string (simple but effective)
+	// Typed status error from doPostJSON (preferred over string scraping).
+	var statusErr *innertubeStatusError
+	if errors.As(err, &statusErr) {
+		switch statusErr.status {
+		case 429, 500, 502, 503, 504:
+			return true
+		}
+		return false
+	}
+
+	// Fallback for any other wrapped "unexpected status" errors (legacy).
 	msg := err.Error()
 	if strings.Contains(msg, "unexpected status 5") ||
-		strings.Contains(msg, "unexpected status 429") ||
-		strings.Contains(msg, "unexpected status 503") {
+		strings.Contains(msg, "unexpected status 429") {
 		return true
 	}
 	return false
+}
+
+// innertubeStatusError is a typed error for non-2xx Innertube responses.
+// This lets isTransientInnertubeError make reliable decisions without string matching.
+type innertubeStatusError struct {
+	status int
+	body   string
+}
+
+func (e *innertubeStatusError) Error() string {
+	return fmt.Sprintf("unexpected status %d: %s", e.status, e.body)
 }
 
 // getVisitorID returns a valid visitor ID, fetching one from YouTube if needed.

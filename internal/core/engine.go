@@ -279,13 +279,14 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 			})
 			return nil, fmt.Errorf("download format %s failed: %w", selected[0].FormatID, err)
 		}
-		if !isStdout {
-			if err := os.Rename(partPath, finalPath); err != nil {
-				return nil, fmt.Errorf("rename part file: %w", err)
-			}
-		} else {
-			temps.Pop() // finalPath is now the active output
-			temps.Pop() // partPath was renamed/consumed
+		// Always rename (even in stdout mode) so that downloaded[] always points
+		// to real files. The stdout path later copies from the final temp file.
+		if err := os.Rename(partPath, finalPath); err != nil {
+			return nil, fmt.Errorf("rename part file: %w", err)
+		}
+		if isStdout {
+			temps.Pop() // finalPath (now the canonical temp file)
+			temps.Pop() // partPath consumed by rename
 		}
 		downloaded[0] = finalPath
 	} else {
@@ -319,11 +320,12 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 					})
 					return fmt.Errorf("download format %s failed: %w", f.FormatID, err)
 				}
-				if !isStdout {
-					if err := os.Rename(partPath, finalPath); err != nil {
-						return fmt.Errorf("rename part file: %w", err)
-					}
-				} else {
+				// Always rename (even in stdout mode) so that downloaded[] always points
+				// to real files for the merger / final stdout copy.
+				if err := os.Rename(partPath, finalPath); err != nil {
+					return fmt.Errorf("rename part file: %w", err)
+				}
+				if isStdout {
 					temps.Pop()
 					temps.Pop()
 				}

@@ -68,7 +68,12 @@ func sanitize(name string) string {
 		">", "-",
 		"|", "-",
 	)
-	return replacer.Replace(name)
+	name = replacer.Replace(name)
+	// Prevent path traversal via ".." in titles/playlists (Issue 2).
+	name = strings.ReplaceAll(name, "..", "_")
+	// Trim leading/trailing dots, underscores, and spaces.
+	name = strings.Trim(name, ". _")
+	return name
 }
 
 // formatDate performs simple date formatting on YYYYMMDD strings.

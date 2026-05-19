@@ -317,11 +317,12 @@ func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) err
 ## Cross-Cutting Concerns
 
 ### Error Handling & Resilience
+- ✅ Distinguish between retryable errors (network) and fatal errors (video removed) — implemented via `isRetryable` + `OnError` callback
 - Add `--retries` and `--retry-sleep` flags
 - Implement exponential backoff for 429/503 responses
-- Distinguish between retryable errors (network) and fatal errors (video removed)
 
 ### Observability
+- ✅ Structured error reporting — `OnError` callback + `--write-error-log` JSON output
 - Migrate from `fmt.Fprintf(os.Stderr, ...)` to `log/slog` with structured logging
 - Add debug-level HTTP request/response dumps (behind `--verbose`)
 - Export Prometheus metrics if running as a library in a server context

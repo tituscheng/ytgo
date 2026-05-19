@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
+
+	"ytgo/internal/limiter"
 )
 
 // SegmentDownloader downloads a single file using multiple concurrent HTTP Range
@@ -26,7 +28,8 @@ type SegmentDownloader struct {
 	BufferPool   *sync.Pool
 	Identity     *DownloadIdentity // nil = no resume validation
 	Continue     bool              // default true; mirrors --no-continue
-	totalSize    int64             // discovered file size (used for progress)
+	Limiter      *limiter.GlobalLimiter
+	totalSize    int64 // discovered file size (used for progress)
 }
 
 // NewSegmentDownloader creates a SegmentDownloader with sensible defaults.
@@ -240,11 +243,19 @@ func (sd *SegmentDownloader) fetchSegment(ctx context.Context, url string, seg B
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
 		return &StatusError{StatusCode: resp.StatusCode, URL: url}
 	}
+
+	// Apply global rate limit (if configured) to the response body.
+	// This is the hot path for all real downloads; the legacy writer path
+	// already did this via ThrottleReader.
+	var body io.ReadCloser = resp.Body
+	if sd.Limiter != nil {
+		body = sd.Limiter.ThrottleReader(ctx, resp.Body)
+	}
+	defer body.Close()
 
 	var buf []byte
 	if sd.BufferPool != nil {
@@ -256,7 +267,7 @@ func (sd *SegmentDownloader) fetchSegment(ctx context.Context, url string, seg B
 
 	offset := seg.StartByte
 	for {
-		n, err := resp.Body.Read(buf)
+		n, err := body.Read(buf)
 		if n > 0 {
 			if _, werr := fd.WriteAt(buf[:n], offset); werr != nil {
 				return fmt.Errorf("writeat %d: %w", offset, werr)
@@ -294,6 +305,7 @@ func (sd *SegmentDownloader) fallback(ctx context.Context, url, destPath string)
 		Client:     sd.Client,
 		Progress:   sd.Progress,
 		BufferPool: sd.BufferPool,
+		Limiter:    sd.Limiter,
 	}
 	return d.Download(ctx, url, file)
 }

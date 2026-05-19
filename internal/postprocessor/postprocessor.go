@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"ytgo/internal/extractor"
 )
@@ -256,7 +257,10 @@ func (e *Embedder) downloadThumbnail(ctx context.Context, thumbs []extractor.Thu
 	if err != nil {
 		return "", err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	// Use a dedicated client with timeout for thumbnail fetch during embed.
+	// (The main download path and side-file thumbnails now share the tuned transport.)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}

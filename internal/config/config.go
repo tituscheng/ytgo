@@ -64,20 +64,14 @@ type DownloadOptions struct {
 	PlaylistStart int  `mapstructure:"playlist-start"`
 	PlaylistEnd   int  `mapstructure:"playlist-end"`
 
-	// Network / auth
-	CookiesFromBrowser string        `mapstructure:"cookies-from-browser"`
-	Cookies            string        `mapstructure:"cookies"`
-	UserAgent          string        `mapstructure:"user-agent"`
-	Referer            string        `mapstructure:"referer"`
-	Proxy              string        `mapstructure:"proxy"`
-	SocketTimeout      time.Duration `mapstructure:"socket-timeout"`
+	// Network
+	SocketTimeout time.Duration `mapstructure:"socket-timeout"`
 
 	// Fragment download
 	ConcurrentFragments int `mapstructure:"concurrent-fragments"`
 
 	// Concurrency limits
 	MaxDownloads      int   `mapstructure:"max-downloads"`
-	MaxExtractors     int   `mapstructure:"max-extractors"`
 	MaxPostProcessors int   `mapstructure:"max-postprocessors"`
 	LimitRate         int64 `mapstructure:"limit-rate"` // bytes/sec
 
@@ -123,9 +117,8 @@ func DefaultOptions() DownloadOptions {
 		PlaylistStart:       1,
 		ConcurrentFragments: 1,
 		SocketTimeout:       30 * time.Second,
-		MaxDownloads:        3,
-		MaxExtractors:       3,
-		MaxPostProcessors:   2,
+		MaxDownloads:      3,
+		MaxPostProcessors: 2,
 		AudioFormat:         "best",
 		AudioQuality:        "5",
 		FFmpegLocation:      "ffmpeg",

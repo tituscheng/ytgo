@@ -1,17 +1,21 @@
 package postprocessor
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"ytgo/internal/extractor"
 )
 
-// DownloadThumbnail downloads the best available thumbnail to the given path.
-func DownloadThumbnail(thumbs []extractor.Thumbnail, dest string) error {
+// DownloadThumbnail downloads the best available thumbnail to the given path
+// using the provided client (for connection reuse and context cancellation).
+// If client is nil, a short-lived default client is used.
+func DownloadThumbnail(ctx context.Context, client *http.Client, thumbs []extractor.Thumbnail, dest string) error {
 	if len(thumbs) == 0 {
 		return fmt.Errorf("no thumbnails available")
 	}
@@ -21,14 +25,21 @@ func DownloadThumbnail(thumbs []extractor.Thumbnail, dest string) error {
 			best = t
 		}
 	}
-	return downloadFile(best.URL, dest)
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	return downloadFile(ctx, client, best.URL, dest)
 }
 
-func downloadFile(url, dest string) error {
+func downloadFile(ctx context.Context, client *http.Client, url, dest string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 		return err
 	}
-	resp, err := http.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}

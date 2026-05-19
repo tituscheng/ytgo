@@ -3,11 +3,9 @@
 // Thread-safety: Archive is safe for concurrent use. All methods acquire an
 // internal mutex, so multiple goroutines may call Has/Add simultaneously.
 //
-// Crash-recovery consistency: Add writes the ID to disk before updating the
-// in-memory map. A crash after the file write but before map update is safe:
-// on restart, the ID will be re-read from disk. A crash before the file write
-// is also safe: the map update is rolled back because the function never
-// returned.
+// Crash-recovery consistency: Add writes the ID to disk first. Only after a
+// successful append do we update the in-memory map. This guarantees that any
+// crash leaves the on-disk archive as the source of truth.
 package archive
 
 import (
@@ -73,12 +71,17 @@ func (a *Archive) Add(id string) error {
 	if a.entries[id] {
 		return nil
 	}
-	a.entries[id] = true
+	// Write to disk first. Only mark in-memory on success so that a crash
+	// cannot leave the map ahead of the file.
 	f, err := os.OpenFile(a.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	_, err = fmt.Fprintln(f, id)
-	return err
+	if _, err := fmt.Fprintln(f, id); err != nil {
+		return err
+	}
+	a.entries[id] = true
+	return nil
+
 }

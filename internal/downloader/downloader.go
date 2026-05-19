@@ -95,6 +95,7 @@ func (d *Downloader) DownloadToFile(ctx context.Context, url, destPath string) e
 	sd.BufferPool = d.BufferPool
 	sd.Identity = d.Identity
 	sd.Continue = d.Continue
+	sd.Limiter = d.Limiter
 	return sd.DownloadToFile(ctx, url, destPath)
 }
 

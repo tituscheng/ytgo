@@ -32,10 +32,23 @@ type Client struct {
 	visitorUpdated time.Time
 }
 
-// NewClient creates a Client with sensible defaults.
+// NewClient creates a Client with sensible defaults (plain transport).
+// Tests and simple usage use this. Production paths should prefer
+// NewClientWithTransport so that connection pooling, keep-alives, and
+// HTTP/2 are shared with the rest of the application.
 func NewClient(timeout time.Duration) *Client {
+	return NewClientWithTransport(nil, timeout)
+}
+
+// NewClientWithTransport creates a Client using the provided RoundTripper
+// (typically a *http.Transport from transport.NewTunedTransport).
+// If rt is nil, a default transport is used.
+func NewClientWithTransport(rt http.RoundTripper, timeout time.Duration) *Client {
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
 	return &Client{
-		HTTPClient: &http.Client{Timeout: timeout},
+		HTTPClient: &http.Client{Transport: rt, Timeout: timeout},
 		consentID:  strconv.Itoa(rand.Intn(899) + 100),
 	}
 }

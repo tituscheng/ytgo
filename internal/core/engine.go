@@ -155,7 +155,7 @@ func (e *Engine) runVideo(ctx context.Context, info *extractor.VideoInfo, arch *
 		return nil
 	}
 	if e.Config.Simulate || e.Config.SkipDownload {
-		if err := e.writeSideFiles(info); err != nil {
+		if err := e.writeSideFiles(ctx, info); err != nil {
 			return err
 		}
 		return e.writeSubtitles(ctx, info)
@@ -391,7 +391,7 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 	}
 
 	// Write side files
-	if err := e.writeSideFiles(info); err != nil {
+	if err := e.writeSideFiles(ctx, info); err != nil {
 		return err
 	}
 	if err := e.writeSubtitles(ctx, info); err != nil {
@@ -622,6 +622,7 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.Video
 		},
 		Continue: e.Config.ContinuePartial,
 		Progress: progressCb,
+		Limiter:  e.Downloader.Limiter,
 	}
 
 	err := d.DownloadToFile(ctx, f.URL, dest)
@@ -637,6 +638,12 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.Video
 					return d.DownloadToFile(ctx, freshFormat.URL, dest)
 				}
 			}
+			// Exact FormatID no longer present after re-extract (YouTube can rotate IDs).
+			// Fall through and return the original 403 so the failure is recorded.
+			e.log("403 recovery: exact format ID not found after re-extract",
+				slog.String("video_id", info.ID),
+				slog.String("format_id", f.FormatID),
+				slog.Int("fresh_formats", len(fresh.Formats)))
 		}
 	}
 	return err
@@ -746,7 +753,7 @@ func (e *Engine) buildOutputPath(info *extractor.VideoInfo, selected []extractor
 	return template.BuildPath(tmpl, info, ext, e.Config.Paths), nil
 }
 
-func (e *Engine) writeSideFiles(info *extractor.VideoInfo) error {
+func (e *Engine) writeSideFiles(ctx context.Context, info *extractor.VideoInfo) error {
 	if e.Config.WriteInfoJSON {
 		path := template.BuildPath(e.Config.OutputTemplate, info, "info.json", e.Config.Paths)
 		data, _ := json.MarshalIndent(info, "", "  ")
@@ -762,7 +769,8 @@ func (e *Engine) writeSideFiles(info *extractor.VideoInfo) error {
 	}
 	if e.Config.WriteThumbnail && len(info.Thumbnails) > 0 {
 		path := template.BuildPath(e.Config.OutputTemplate, info, "jpg", e.Config.Paths)
-		if err := postprocessor.DownloadThumbnail(info.Thumbnails, path); err != nil {
+		thumbClient := &http.Client{Transport: e.Transport, Timeout: 30 * time.Second}
+		if err := postprocessor.DownloadThumbnail(ctx, thumbClient, info.Thumbnails, path); err != nil {
 			return err
 		}
 	}

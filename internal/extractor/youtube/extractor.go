@@ -10,6 +10,7 @@ import (
 
 	"ytgo/internal/extractor"
 	"ytgo/internal/extractor/youtube/innertube"
+	"ytgo/internal/transport"
 )
 
 var (
@@ -23,9 +24,12 @@ type Extractor struct {
 	Enrich  bool // if true, makes secondary API calls for additional metadata
 }
 
-// NewExtractor creates a new YouTube extractor.
+// NewExtractor creates a new YouTube extractor that uses the tuned
+// transport (connection pooling, HTTP/2, keep-alives) for all Innertube calls.
 func NewExtractor(timeout time.Duration) *Extractor {
-	return &Extractor{client: innertube.NewClient(timeout)}
+	return &Extractor{
+		client: innertube.NewClientWithTransport(transport.NewTunedTransport(), timeout),
+	}
 }
 
 // Name returns the extractor identifier.

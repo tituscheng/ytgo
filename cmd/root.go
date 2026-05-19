@@ -99,11 +99,7 @@ func init() {
 	rootCmd.Flags().Int("playlist-start", cfg.PlaylistStart, "Playlist start index")
 	rootCmd.Flags().Int("playlist-end", 0, "Playlist end index")
 
-	// Network / auth
-	rootCmd.Flags().String("cookies-from-browser", "", "Browser to extract cookies from")
-	rootCmd.Flags().String("cookies", "", "Cookie file path")
-	rootCmd.Flags().String("user-agent", "", "User agent string")
-	rootCmd.Flags().String("proxy", "", "HTTP proxy URL")
+	// Network
 	rootCmd.Flags().Duration("socket-timeout", cfg.SocketTimeout, "Network timeout")
 
 	// Fragment download
@@ -111,7 +107,6 @@ func init() {
 
 	// Concurrency limits
 	rootCmd.Flags().Int("max-downloads", cfg.MaxDownloads, "Maximum concurrent video downloads")
-	rootCmd.Flags().Int("max-extractors", cfg.MaxExtractors, "Maximum concurrent metadata extractions")
 	rootCmd.Flags().Int("max-postprocessors", cfg.MaxPostProcessors, "Maximum concurrent post-processing jobs")
 	rootCmd.Flags().Int64("limit-rate", cfg.LimitRate, "Maximum download rate in bytes per second")
 

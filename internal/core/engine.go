@@ -81,7 +81,8 @@ func (pa *progressAggregate) report(formatID string, down, tot int64) {
 // NewEngine builds an Engine with default YouTube support.
 func NewEngine(cfg config.DownloadOptions) *Engine {
 	tp := transport.NewTunedTransport()
-	return &Engine{
+
+	eng := &Engine{
 		Extractors: []extractor.InfoExtractor{},
 		Downloader: &downloader.Downloader{
 			Client:     &http.Client{Transport: tp, Timeout: 0},
@@ -91,8 +92,13 @@ func NewEngine(cfg config.DownloadOptions) *Engine {
 		},
 		Config:    cfg,
 		Transport: tp,
-
 	}
+
+	if cfg.LimitRate > 0 {
+		eng.log("rate limiting enabled", slog.Int64("bytes_per_sec", cfg.LimitRate))
+	}
+
+	return eng
 }
 
 // Register adds an extractor to the engine.
@@ -185,6 +191,9 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 
 	// Check archive (using shared instance if available)
 	if arch != nil && arch.Has(info.ID) {
+		e.log("archive hit, skipping download",
+			slog.String("video_id", info.ID),
+			slog.String("title", info.Title))
 		if !e.Config.Quiet {
 			color.Yellow("[%s] %s: has already been recorded in archive", info.ID, info.Title)
 		}
@@ -211,6 +220,11 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 		})
 		return nil, fmt.Errorf("format selection failed: %w", err)
 	}
+
+	e.log("formats selected",
+		slog.String("video_id", info.ID),
+		slog.Int("count", len(selected)),
+		slog.Any("format_ids", formatIDs(selected)))
 
 	if e.Config.Verbose {
 		color.Cyan("Selected %d format(s)", len(selected))
@@ -330,6 +344,12 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 	downloaded := task.downloaded
 	isStdout := e.Config.OutputTemplate == "-"
 
+	e.log("starting post-processing",
+		slog.String("video_id", info.ID),
+		slog.Int("files_to_merge", len(downloaded)),
+		slog.Bool("extract_audio", e.Config.ExtractAudio),
+		slog.Bool("embed", e.Config.EmbedThumbnail || e.Config.EmbedMetadata))
+
 	finalPath := outputPath
 	if len(downloaded) > 1 || e.Config.MergeOutputFormat != "" || isStdout {
 		merger := postprocessor.NewMerger(e.Config.FFmpegLocation)
@@ -352,6 +372,11 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 		}
 	}
 
+	// Audio extraction happens after merge/embed decisions.
+	// Note: When using -x with a single audio format, some advanced
+	// behaviors (resume identity on the converter stage, certain progress
+	// aggregation) are intentionally reduced compared to normal downloads.
+	// The core download still uses the full segmented + resume machinery.
 	if e.Config.ExtractAudio {
 		conv := postprocessor.NewConverter(e.Config.FFmpegLocation)
 		converted, err := conv.ExtractAudio(ctx, finalPath, e.Config.AudioFormat, e.Config.AudioQuality)
@@ -471,6 +496,7 @@ func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) (*y
 	postprocPool.Start(ctx)
 	for i := 0; i < max(1, e.Config.MaxPostProcessors); i++ {
 		postprocPool.Submit(ctx, func() error {
+			var firstErr error
 			for task := range postprocChan {
 				if err := e.postProcessVideo(ctx, task, arch); err != nil {
 					reportMu.Lock()
@@ -483,6 +509,9 @@ func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) (*y
 						Retryable: false,
 					})
 					reportMu.Unlock()
+					if firstErr == nil {
+						firstErr = err
+					}
 					if !e.Config.NoWarnings {
 						color.Red("Error post-processing %s: %v", task.info.Title, err)
 					}
@@ -492,7 +521,7 @@ func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) (*y
 					reportMu.Unlock()
 				}
 			}
-			return nil
+			return firstErr
 		})
 	}
 
@@ -581,6 +610,12 @@ func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) (*y
 }
 
 func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.VideoInfo, f extractor.Format, dest string, current, total int, pa *progressAggregate) error {
+	e.log("starting format download",
+		slog.String("video_id", info.ID),
+		slog.String("format_id", f.FormatID),
+		slog.String("dest", dest),
+		slog.Int64("filesize", f.Filesize))
+
 	// For concurrent downloads (total > 1), skip the interactive spinner to
 	// avoid stderr interleaving. Instead, log start and completion.
 	concurrent := total > 1
@@ -639,6 +674,9 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.Video
 		if reextractErr == nil {
 			for _, freshFormat := range fresh.Formats {
 				if freshFormat.FormatID == f.FormatID {
+					e.log("403 recovery succeeded, retrying with fresh URL",
+						slog.String("video_id", info.ID),
+						slog.String("format_id", f.FormatID))
 					// Retry with fresh URL (same identity, so resume state is preserved)
 					return d.DownloadToFile(ctx, freshFormat.URL, dest)
 				}
@@ -713,6 +751,15 @@ func (e *Engine) log(msg string, attrs ...slog.Attr) {
 		return
 	}
 	e.Config.Logger.LogAttrs(context.Background(), slog.LevelDebug, msg, attrs...)
+}
+
+// formatIDs is a tiny helper for structured logging.
+func formatIDs(formats []extractor.Format) []string {
+	ids := make([]string, len(formats))
+	for i, f := range formats {
+		ids[i] = f.FormatID
+	}
+	return ids
 }
 
 // reextract fetches fresh metadata for a video using the registered extractors.

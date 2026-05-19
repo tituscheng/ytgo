@@ -21,10 +21,15 @@ var rootCmd = &cobra.Command{
 	Short: "A YouTube downloader written in Go",
 	Long: `ytgo is a yt-dlp-inspired downloader focused on YouTube support.
 It can be used as a CLI tool or imported as a Go library.`,
-	Args:          cobra.ExactArgs(1),
+	Args:          cobra.MaximumNArgs(1),
 	SilenceUsage:  true,
 	SilenceErrors: true,
-	RunE:          run,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return cmd.Help()
+		}
+		return run(cmd, args)
+	},
 }
 
 func Execute() {

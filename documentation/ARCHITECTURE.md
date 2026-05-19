@@ -61,6 +61,8 @@ Both paths converge on `core.Engine.Run()`, which is the single entry point for 
 - `OnProgress` — aggregated download progress (bytes downloaded / total)
 - `OnError` — structured failure report for every video that fails (playlist-safe)
 
+**Playlist Report:** `Engine.Run()` returns a `*ytgo.PlaylistReport` for playlist URLs containing `Total`, `Succeeded`, `Skipped`, and `Failed` counts.
+
 ---
 
 ### 3. Engine Layer (`internal/core/`)
@@ -95,8 +97,9 @@ Run(url)
 **Key design decisions:**
 
 - **Playlist entries are re-extracted individually.** The Innertube `browse` endpoint returns metadata (title, duration, thumbnails) but not format URLs. Each entry gets a fresh `player` request before download. This is why playlist extraction is fast (~0.4 s for 15 items) compared to yt-dlp, which does a full player request per entry during the list phase.
-- **Stdout output (`-o -`) is handled by downloading to a temp file, then streaming it to `os.Stdout`.** This avoids trying to pipe an in-progress HTTP download directly, which complicates merge and post-process.
+- **Stdout output (`-o -`) is handled by downloading to a temp file, then streaming it to `os.Stdout`.** This avoids trying to pipe an in-progress HTTP download directly, which complicates merge and post-process. Temp files are tracked with a `cleanup.Stack` and removed on error paths.
 - **Archive check happens before format selection.** If the video is already archived, we skip everything — no network requests, no format parsing.
+- **Typed HTTP errors.** The `downloader` package returns `*StatusError` with `StatusCode` and sentinel errors (`ErrForbidden`, `ErrRateLimited`, `ErrTransient`). `Engine` uses `errors.As` and `errors.Is` for robust classification instead of string matching.
 
 ---
 
@@ -214,7 +217,7 @@ err := d.DownloadToFile(ctx, url, "/path/to/video.mp4")
 
 ### 7. Post-Processing Layer (`internal/postprocessor/`)
 
-**Files:** `postprocessor.go`, `thumbnail.go`
+**Files:** `postprocessor.go`, `stream.go`, `thumbnail.go`
 
 FFmpeg-based post-processing:
 
@@ -222,6 +225,7 @@ FFmpeg-based post-processing:
 - **`Converter`** — extracts audio (`-x --audio-format mp3`).
 - **`Embedder`** — embeds metadata, thumbnail, subtitles, chapters into the output file.
 - **`DownloadThumbnail`** — fetches the best thumbnail URL and saves it.
+- **`StreamConverter`** — pipes HTTP downloads directly into FFmpeg for audio extraction. Uses the configured `*Downloader` so rate limiting and progress callbacks are preserved.
 
 **Auto-faststart:** MP4/M4A/MOV outputs automatically receive `-movflags +faststart` for web streaming compatibility. No flag required.
 
@@ -234,6 +238,7 @@ All post-processors accept the path to the `ffmpeg` binary via `config.FFmpegLoc
 | Package | Responsibility |
 |---|---|
 | `internal/config` | `DownloadOptions` struct with `mapstructure` tags for viper unmarshalling |
+| `internal/cleanup` | Temp file tracker with guaranteed cleanup on defer |
 | `internal/archive` | Plain-text ID archive (one video ID per line) |
 | `internal/template` | Output filename template engine: `%(title)s`, `%(id)s`, `%(upload_date>%Y-%m-%d)s`, etc. |
 | `internal/subtitle` | Fetch subtitle tracks, convert JSON3 → SRT/VTT |
@@ -300,6 +305,7 @@ Extend `internal/format/selector.go`. The selector already understands most yt-d
 - **Unit tests** with `httptest` for the Innertube client (`innertube_test.go`). Mock JSON responses, assert parsed structs.
 - **No network-dependent tests in CI.** All extractor tests use mocked HTTP.
 - **Manual integration tests** against real YouTube URLs for regression checking (not committed).
+- **Race detector** — `go test -race ./...` is run regularly to catch concurrency issues in the worker pool and segment downloader.
 
 ---
 

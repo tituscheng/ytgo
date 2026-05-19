@@ -25,7 +25,8 @@ func DefaultOptions() DownloadOptions {
 func Download(ctx context.Context, url string, opts DownloadOptions) error {
 	engine := core.NewEngine(opts)
 	engine.Register(youtube.NewExtractor(opts.SocketTimeout))
-	return engine.Run(ctx, url)
+	_, err := engine.Run(ctx, url)
+	return err
 }
 
 // ExtractOptions configures metadata extraction without downloading.

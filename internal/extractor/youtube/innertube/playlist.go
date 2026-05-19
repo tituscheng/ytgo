@@ -28,7 +28,7 @@ type PlaylistInfo struct {
 
 // Playlist fetches playlist metadata and all video entries.
 func (c *Client) Playlist(ctx context.Context, playlistID string) (*PlaylistInfo, error) {
-	visitorID, err := c.getVisitorID()
+	visitorID, err := c.getVisitorID(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +82,7 @@ func (c *Client) Playlist(ctx context.Context, playlistID string) (*PlaylistInfo
 
 	// Follow continuation tokens
 	for continuation != "" {
-		visitorID, err := c.getVisitorID()
+		visitorID, err := c.getVisitorID(ctx)
 		if err != nil {
 			return nil, err
 		}

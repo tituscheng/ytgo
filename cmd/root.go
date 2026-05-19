@@ -153,61 +153,10 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 	_ = viper.Unmarshal(&cfg)
 
-	// Override from flags
-	cfg.Format, _ = cmd.Flags().GetString("format")
-	cfg.OutputTemplate, _ = cmd.Flags().GetString("output")
-	cfg.Paths, _ = cmd.Flags().GetString("paths")
-	cfg.ListFormats, _ = cmd.Flags().GetBool("list-formats")
-	cfg.WriteSubs, _ = cmd.Flags().GetBool("write-subs")
-	cfg.WriteAutoSubs, _ = cmd.Flags().GetBool("write-auto-subs")
-	cfg.EmbedSubs, _ = cmd.Flags().GetBool("embed-subs")
-	cfg.SubLangs, _ = cmd.Flags().GetStringSlice("sub-langs")
-	cfg.SubFormat, _ = cmd.Flags().GetString("sub-format")
-	cfg.WriteInfoJSON, _ = cmd.Flags().GetBool("write-info-json")
-	cfg.WriteDescription, _ = cmd.Flags().GetBool("write-description")
-	cfg.EmbedMetadata, _ = cmd.Flags().GetBool("embed-metadata")
-	cfg.EmbedThumbnail, _ = cmd.Flags().GetBool("embed-thumbnail")
-	cfg.WriteThumbnail, _ = cmd.Flags().GetBool("write-thumbnail")
-	cfg.EmbedChapters, _ = cmd.Flags().GetBool("embed-chapters")
-	cfg.SkipDownload, _ = cmd.Flags().GetBool("skip-download")
-	cfg.Simulate, _ = cmd.Flags().GetBool("simulate")
-	cfg.DownloadArchive, _ = cmd.Flags().GetString("download-archive")
-	cfg.NoOverwrites, _ = cmd.Flags().GetBool("no-overwrites")
-	noContinue, _ := cmd.Flags().GetBool("no-continue")
-	cfg.ContinuePartial = !noContinue
-	cfg.ExtractAudio, _ = cmd.Flags().GetBool("extract-audio")
-	cfg.AudioFormat, _ = cmd.Flags().GetString("audio-format")
-	cfg.AudioQuality, _ = cmd.Flags().GetString("audio-quality")
-	cfg.KeepVideo, _ = cmd.Flags().GetBool("keep-video")
-	cfg.MergeOutputFormat, _ = cmd.Flags().GetString("merge-output-format")
-	cfg.RemuxVideo, _ = cmd.Flags().GetString("remux-video")
-	cfg.RecodeVideo, _ = cmd.Flags().GetString("recode-video")
-	cfg.YesPlaylist, _ = cmd.Flags().GetBool("yes-playlist")
-	cfg.NoPlaylist, _ = cmd.Flags().GetBool("no-playlist")
-	cfg.PlaylistStart, _ = cmd.Flags().GetInt("playlist-start")
-	cfg.PlaylistEnd, _ = cmd.Flags().GetInt("playlist-end")
-	cfg.PlaylistItems, _ = cmd.Flags().GetString("playlist-items")
-	cfg.CookiesFromBrowser, _ = cmd.Flags().GetString("cookies-from-browser")
-	cfg.Cookies, _ = cmd.Flags().GetString("cookies")
-	cfg.UserAgent, _ = cmd.Flags().GetString("user-agent")
-	cfg.Proxy, _ = cmd.Flags().GetString("proxy")
-	cfg.SocketTimeout, _ = cmd.Flags().GetDuration("socket-timeout")
-	cfg.ConcurrentFragments, _ = cmd.Flags().GetInt("concurrent-fragments")
-	cfg.MaxDownloads, _ = cmd.Flags().GetInt("max-downloads")
-	cfg.MaxExtractors, _ = cmd.Flags().GetInt("max-extractors")
-	cfg.MaxPostProcessors, _ = cmd.Flags().GetInt("max-postprocessors")
-	cfg.LimitRate, _ = cmd.Flags().GetInt64("limit-rate")
-	cfg.FFmpegLocation, _ = cmd.Flags().GetString("ffmpeg-location")
-	cfg.PreferVideoCodec, _ = cmd.Flags().GetString("prefer-vcodec")
-	cfg.PreferAudioCodec, _ = cmd.Flags().GetString("prefer-acodec")
-	cfg.PreferContainer, _ = cmd.Flags().GetString("prefer-ext")
-	cfg.Quiet, _ = cmd.Flags().GetBool("quiet")
-	cfg.NoWarnings, _ = cmd.Flags().GetBool("no-warnings")
-	cfg.Verbose, _ = cmd.Flags().GetBool("verbose")
-	cfg.PrintJSON, _ = cmd.Flags().GetBool("print-json")
-	cfg.NoProgress, _ = cmd.Flags().GetBool("no-progress")
-	cfg.EnrichMetadata, _ = cmd.Flags().GetBool("enrich-metadata")
-	cfg.WriteErrorLog, _ = cmd.Flags().GetString("write-error-log")
+	// Handle the one inverted flag that viper cannot express directly
+	if noContinue, _ := cmd.Flags().GetBool("no-continue"); noContinue {
+		cfg.ContinuePartial = false
+	}
 
 	if cfg.Verbose {
 		fmt.Fprintf(os.Stderr, "Options: %+v\n", cfg)
@@ -230,13 +179,18 @@ func run(cmd *cobra.Command, args []string) error {
 	ext.Enrich = cfg.EnrichMetadata
 	engine.Register(ext)
 
-	runErr := engine.Run(ctx, args[0])
+	report, runErr := engine.Run(ctx, args[0])
 
 	if cfg.WriteErrorLog != "" && len(failures) > 0 {
 		data, _ := json.MarshalIndent(failures, "", "  ")
 		if werr := os.WriteFile(cfg.WriteErrorLog, data, 0644); werr != nil && runErr == nil {
 			runErr = fmt.Errorf("write error log: %w", werr)
 		}
+	}
+
+	if cfg.Verbose && report != nil {
+		fmt.Fprintf(os.Stderr, "Playlist complete: %d total, %d succeeded, %d skipped, %d failed\n",
+			report.Total, report.Succeeded, report.Skipped, len(report.Failed))
 	}
 
 	return runErr

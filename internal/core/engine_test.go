@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"ytgo/internal/config"
+	"ytgo/internal/downloader"
 	"ytgo/pkg/ytgo"
 )
 
@@ -38,7 +40,7 @@ func TestEngineRun_ListFormats(t *testing.T) {
 	eng := NewEngine(config.DownloadOptions{ListFormats: true})
 	eng.Register(&mockExtractor{info: info})
 
-	err := eng.Run(context.Background(), "http://example.com")
+	_, err := eng.Run(context.Background(), "http://example.com")
 	require.NoError(t, err)
 }
 
@@ -62,7 +64,7 @@ func TestEngineRun_SkipDownload(t *testing.T) {
 	eng := NewEngine(cfg)
 	eng.Register(&mockExtractor{info: info})
 
-	err := eng.Run(context.Background(), "http://example.com")
+	_, err := eng.Run(context.Background(), "http://example.com")
 	require.NoError(t, err)
 
 	assert.FileExists(t, filepath.Join(tmpDir, "My Video [test123].info.json"))
@@ -92,7 +94,7 @@ func TestEngineRun_Download(t *testing.T) {
 	eng := NewEngine(cfg)
 	eng.Register(&mockExtractor{info: info})
 
-	err := eng.Run(context.Background(), "http://example.com")
+	_, err := eng.Run(context.Background(), "http://example.com")
 	require.NoError(t, err)
 
 	assert.FileExists(t, filepath.Join(tmpDir, "My Video [test123].mp4"))
@@ -123,11 +125,11 @@ func TestEngineRun_Archive(t *testing.T) {
 	eng := NewEngine(cfg)
 	eng.Register(&mockExtractor{info: info})
 
-	err := eng.Run(context.Background(), "http://example.com")
+	_, err := eng.Run(context.Background(), "http://example.com")
 	require.NoError(t, err)
 
 	// Second run should be skipped
-	err = eng.Run(context.Background(), "http://example.com")
+	_, err = eng.Run(context.Background(), "http://example.com")
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(archivePath)
@@ -175,7 +177,7 @@ func TestEngineRun_DownloadWithProgress(t *testing.T) {
 	eng := NewEngine(cfg)
 	eng.Register(&mockExtractor{info: info})
 
-	err := eng.Run(context.Background(), "http://example.com")
+	_, err := eng.Run(context.Background(), "http://example.com")
 	require.NoError(t, err)
 
 	assert.True(t, progressCalled, "OnProgress should have been called")
@@ -203,7 +205,7 @@ func TestEngineRun_EnrichMetadata(t *testing.T) {
 	eng := NewEngine(cfg)
 	eng.Register(&mockExtractor{info: info})
 
-	err := eng.Run(context.Background(), "http://example.com")
+	_, err := eng.Run(context.Background(), "http://example.com")
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "My Video [test123].info.json"))
@@ -263,7 +265,7 @@ func TestEngineRun_OnError_SingleVideo(t *testing.T) {
 	eng := NewEngine(cfg)
 	eng.Register(&mockFailingExtractor{err: assert.AnError})
 
-	err := eng.Run(context.Background(), "http://example.com")
+	_, err := eng.Run(context.Background(), "http://example.com")
 	require.Error(t, err)
 
 	assert.Equal(t, "http://example.com", failure.URL)
@@ -310,7 +312,7 @@ func TestEngineRun_OnError_Playlist(t *testing.T) {
 	eng.Register(&mockExtractor{info: info})
 
 	// Playlist should return nil even though all 3 videos failed
-	err := eng.Run(context.Background(), "http://example.com")
+	_, err := eng.Run(context.Background(), "http://example.com")
 	require.NoError(t, err)
 
 	require.Len(t, failures, 3)
@@ -372,4 +374,79 @@ func TestDownloadFailure_JSON(t *testing.T) {
 	assert.Contains(t, string(data), `"video_id":"abc123"`)
 	assert.Contains(t, string(data), `"stage":"download"`)
 	assert.Contains(t, string(data), `"retryable":true`)
+}
+
+func TestIsForbiddenTyped(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{"nil", nil, false},
+		{"typed 403", &downloader.StatusError{StatusCode: 403}, true},
+		{"typed 404", &downloader.StatusError{StatusCode: 404}, false},
+		{"wrapped 403", fmt.Errorf("wrapped: %w", &downloader.StatusError{StatusCode: 403}), true},
+		{"string 403", fmt.Errorf("HTTP 403"), true},
+		{"string 404", fmt.Errorf("HTTP 404"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isForbidden(tt.err))
+		})
+	}
+}
+
+func TestIsRetryableNetwork(t *testing.T) {
+	// Test that url.Error with Temporary/Timeout is recognized
+	timeoutErr := &url.Error{Op: "Get", URL: "http://example.com", Err: context.DeadlineExceeded}
+	assert.True(t, isRetryable(timeoutErr), "timeout url.Error should be retryable")
+
+	// Test typed errors
+	assert.True(t, isRetryable(&downloader.StatusError{StatusCode: 429}), "typed 429 should be retryable")
+	assert.True(t, isRetryable(&downloader.StatusError{StatusCode: 503}), "typed 503 should be retryable")
+	assert.False(t, isRetryable(&downloader.StatusError{StatusCode: 403}), "typed 403 should not be retryable")
+}
+
+func TestPlaylistReport(t *testing.T) {
+	content := []byte("fake video content")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	tmpDir := t.TempDir()
+	info := &ytgo.VideoInfo{
+		ID:            "pl123",
+		Title:         "My Playlist",
+		PlaylistTitle: "My Playlist",
+		Entries: []*ytgo.VideoInfo{
+			{ID: "v1", Title: "Video 1", OriginalURL: "http://example.com/1", Formats: []ytgo.Format{
+				{FormatID: "1", URL: srv.URL, Ext: "mp4", HasVideo: true, HasAudio: true},
+			}},
+			{ID: "v2", Title: "Video 2", OriginalURL: "http://example.com/2", Formats: []ytgo.Format{
+				{FormatID: "1", URL: srv.URL, Ext: "mp4", HasVideo: true, HasAudio: true},
+			}},
+			{ID: "v3", Title: "Video 3", OriginalURL: "http://example.com/3", Formats: []ytgo.Format{
+				{FormatID: "1", URL: srv.URL, Ext: "mp4", HasVideo: true, HasAudio: true},
+			}},
+		},
+	}
+
+	cfg := config.DownloadOptions{
+		OutputTemplate: "%(title)s.%(ext)s",
+		Paths:          tmpDir,
+		NoProgress:     true,
+		NoWarnings:     true,
+	}
+	eng := NewEngine(cfg)
+	eng.Register(&mockExtractor{info: info})
+
+	report, err := eng.Run(context.Background(), "http://example.com")
+	require.NoError(t, err)
+	require.NotNil(t, report)
+
+	assert.Equal(t, 3, report.Total)
+	assert.Equal(t, 0, len(report.Failed))
+	assert.Equal(t, 0, report.Skipped)
+	assert.Equal(t, 3, report.Succeeded)
 }

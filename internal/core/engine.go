@@ -4,9 +4,12 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +20,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"ytgo/internal/archive"
+	"ytgo/internal/cleanup"
 	"ytgo/internal/config"
 	"ytgo/internal/downloader"
 	"ytgo/internal/extractor"
@@ -36,7 +40,6 @@ type Engine struct {
 	Downloader *downloader.Downloader
 	Config     config.DownloadOptions
 	Transport  *http.Transport
-	bufPool    *sync.Pool
 }
 
 // progressAggregate sums per-format download progress into a single callback.
@@ -85,7 +88,7 @@ func NewEngine(cfg config.DownloadOptions) *Engine {
 		},
 		Config:    cfg,
 		Transport: tp,
-		bufPool:   &sync.Pool{New: func() any { return make([]byte, 32*1024) }},
+
 	}
 }
 
@@ -95,7 +98,8 @@ func (e *Engine) Register(ext extractor.InfoExtractor) {
 }
 
 // Run executes the pipeline for a single URL.
-func (e *Engine) Run(ctx context.Context, rawURL string) error {
+// For playlist URLs it returns a PlaylistReport summarizing the outcome.
+func (e *Engine) Run(ctx context.Context, rawURL string) (*ytgo.PlaylistReport, error) {
 	// 1. Find suitable extractor
 	var ext extractor.InfoExtractor
 	for _, candidate := range e.Extractors {
@@ -105,9 +109,10 @@ func (e *Engine) Run(ctx context.Context, rawURL string) error {
 		}
 	}
 	if ext == nil {
-		return fmt.Errorf("no extractor found for URL: %s", rawURL)
+		return nil, fmt.Errorf("no extractor found for URL: %s", rawURL)
 	}
 
+	e.log("extracting", slog.String("extractor", ext.Name()), slog.String("url", rawURL))
 	if e.Config.Verbose {
 		color.Yellow("[%s] Extracting: %s", ext.Name(), rawURL)
 	}
@@ -121,7 +126,7 @@ func (e *Engine) Run(ctx context.Context, rawURL string) error {
 			Error:     err.Error(),
 			Retryable: isRetryable(err),
 		})
-		return fmt.Errorf("extraction failed: %w", err)
+		return nil, fmt.Errorf("extraction failed: %w", err)
 	}
 
 	// Open archive once for single-video runs (playlists open their own)
@@ -129,7 +134,7 @@ func (e *Engine) Run(ctx context.Context, rawURL string) error {
 	if e.Config.DownloadArchive != "" && !info.IsPlaylist() {
 		arch, err = archive.Open(e.Config.DownloadArchive)
 		if err != nil {
-			return fmt.Errorf("open archive: %w", err)
+			return nil, fmt.Errorf("open archive: %w", err)
 		}
 	}
 
@@ -137,7 +142,7 @@ func (e *Engine) Run(ctx context.Context, rawURL string) error {
 		return e.runPlaylist(ctx, info)
 	}
 
-	return e.runVideo(ctx, info, arch)
+	return nil, e.runVideo(ctx, info, arch)
 }
 
 func (e *Engine) runVideo(ctx context.Context, info *extractor.VideoInfo, arch *archive.Archive) error {
@@ -171,6 +176,9 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 		e.Config.NoProgress = true
 		e.Config.Quiet = true
 	}
+
+	var temps cleanup.Stack
+	defer temps.Cleanup()
 
 	// Check archive (using shared instance if available)
 	if arch != nil && arch.Has(info.ID) {
@@ -228,7 +236,7 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 	// format, pipe the download directly into FFmpeg instead of saving an
 	// intermediate file.
 	if e.Config.ExtractAudio && len(selected) == 1 && selected[0].HasAudio && !isStdout {
-		sc := postprocessor.NewStreamConverter(e.Config.FFmpegLocation)
+		sc := postprocessor.NewStreamConverter(e.Config.FFmpegLocation, e.Downloader)
 		if err := sc.ExtractAudio(ctx, e.Downloader.Client, selected[0].URL, outputPath, e.Config.AudioFormat, e.Config.AudioQuality); err != nil {
 			e.reportFailure(ytgo.DownloadFailure{
 				VideoID:   info.ID,
@@ -259,6 +267,8 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 		if isStdout {
 			partPath = filepath.Join(os.TempDir(), filepath.Base(finalPath)) + ".part"
 			finalPath = filepath.Join(os.TempDir(), filepath.Base(finalPath))
+			temps.Push(partPath)
+			temps.Push(finalPath)
 		}
 		if err := e.downloadFormatToFile(ctx, info, selected[0], partPath, 1, 1, pa); err != nil {
 			e.reportFailure(ytgo.DownloadFailure{
@@ -276,6 +286,9 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 			if err := os.Rename(partPath, finalPath); err != nil {
 				return nil, fmt.Errorf("rename part file: %w", err)
 			}
+		} else {
+			temps.Pop() // finalPath is now the active output
+			temps.Pop() // partPath was renamed/consumed
 		}
 		downloaded[0] = finalPath
 	} else {
@@ -292,6 +305,8 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 				if isStdout {
 					partPath = filepath.Join(os.TempDir(), filepath.Base(finalPath)) + ".part"
 					finalPath = filepath.Join(os.TempDir(), filepath.Base(finalPath))
+					temps.Push(partPath)
+					temps.Push(finalPath)
 				}
 				if err := e.downloadFormatToFile(ctx, info, f, partPath, i+1, len(selected), pa); err != nil {
 					e.reportFailure(ytgo.DownloadFailure{
@@ -309,6 +324,9 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 					if err := os.Rename(partPath, finalPath); err != nil {
 						return fmt.Errorf("rename part file: %w", err)
 					}
+				} else {
+					temps.Pop()
+					temps.Pop()
 				}
 				downloaded[i] = finalPath
 				return nil
@@ -427,7 +445,7 @@ type videoTask struct {
 	streamed   bool // true if audio was extracted via streaming (no intermediate file)
 }
 
-func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) error {
+func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) (*ytgo.PlaylistReport, error) {
 	color.Cyan("Playlist: %s (%d entries)", info.PlaylistTitle, len(info.Entries))
 
 	// Apply playlist range filters
@@ -441,13 +459,18 @@ func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) err
 	}
 	entries := info.Entries[start:end]
 
+	report := &ytgo.PlaylistReport{
+		Total: len(entries),
+	}
+	var reportMu sync.Mutex
+
 	// Open archive once and share across workers
 	var arch *archive.Archive
 	if e.Config.DownloadArchive != "" {
 		var err error
 		arch, err = archive.Open(e.Config.DownloadArchive)
 		if err != nil {
-			return fmt.Errorf("open archive: %w", err)
+			return report, fmt.Errorf("open archive: %w", err)
 		}
 	}
 
@@ -463,9 +486,23 @@ func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) err
 		postprocPool.Submit(ctx, func() error {
 			for task := range postprocChan {
 				if err := e.postProcessVideo(ctx, task, arch); err != nil {
+					reportMu.Lock()
+					report.Failed = append(report.Failed, ytgo.DownloadFailure{
+						VideoID:   task.info.ID,
+						Title:     task.info.Title,
+						URL:       task.info.OriginalURL,
+						Stage:     "postprocess",
+						Error:     err.Error(),
+						Retryable: false,
+					})
+					reportMu.Unlock()
 					if !e.Config.NoWarnings {
 						color.Red("Error post-processing %s: %v", task.info.Title, err)
 					}
+				} else {
+					reportMu.Lock()
+					report.Succeeded++
+					reportMu.Unlock()
 				}
 			}
 			return nil
@@ -512,17 +549,31 @@ func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) err
 
 			task, err := e.downloadVideo(ctx, &job, arch)
 			if err != nil {
+				reportMu.Lock()
+				report.Failed = append(report.Failed, ytgo.DownloadFailure{
+					VideoID:   job.ID,
+					Title:     job.Title,
+					URL:       job.OriginalURL,
+					Stage:     "download",
+					Error:     err.Error(),
+					Retryable: isRetryable(err),
+				})
+				reportMu.Unlock()
 				if !e.Config.NoWarnings {
 					color.Red("Error downloading %s: %v", job.Title, err)
 				}
 				return nil
 			}
-			if task != nil {
-				select {
-				case postprocChan <- task:
-				case <-ctx.Done():
-					return ctx.Err()
-				}
+			if task == nil {
+				reportMu.Lock()
+				report.Skipped++
+				reportMu.Unlock()
+				return nil
+			}
+			select {
+			case postprocChan <- task:
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 			return nil
 		}); err != nil {
@@ -537,9 +588,9 @@ func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) err
 	postprocErr := postprocPool.Wait()
 
 	if downloadErr != nil {
-		return downloadErr
+		return report, downloadErr
 	}
-	return postprocErr
+	return report, postprocErr
 }
 
 func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.VideoInfo, f extractor.Format, dest string, current, total int, pa *progressAggregate) error {
@@ -614,6 +665,11 @@ func isForbidden(err error) bool {
 	if err == nil {
 		return false
 	}
+	var he *downloader.StatusError
+	if errors.As(err, &he) && he.StatusCode == http.StatusForbidden {
+		return true
+	}
+	// Fallback for non-typed errors
 	return strings.Contains(err.Error(), "403")
 }
 
@@ -622,6 +678,17 @@ func isRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
+	if errors.Is(err, downloader.ErrRateLimited) || errors.Is(err, downloader.ErrTransient) {
+		return true
+	}
+	// Inspect network-level errors
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		if urlErr.Temporary() || urlErr.Timeout() {
+			return true
+		}
+	}
+	// Fallback for non-typed errors
 	msg := err.Error()
 	if strings.Contains(msg, "429") || strings.Contains(msg, "503") || strings.Contains(msg, "504") {
 		return true
@@ -640,6 +707,14 @@ func (e *Engine) reportFailure(f ytgo.DownloadFailure) {
 	if e.Config.OnError != nil {
 		e.Config.OnError(f)
 	}
+}
+
+// log emits a structured debug log if a logger is configured.
+func (e *Engine) log(msg string, attrs ...slog.Attr) {
+	if e.Config.Logger == nil {
+		return
+	}
+	e.Config.Logger.LogAttrs(context.Background(), slog.LevelDebug, msg, attrs...)
 }
 
 // reextract fetches fresh metadata for a video using the registered extractors.

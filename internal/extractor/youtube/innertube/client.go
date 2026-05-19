@@ -142,9 +142,9 @@ func (c *Client) postJSON(ctx context.Context, endpoint string, body any) ([]byt
 }
 
 // getVisitorID returns a valid visitor ID, fetching one from YouTube if needed.
-func (c *Client) getVisitorID() (string, error) {
+func (c *Client) getVisitorID(ctx context.Context) (string, error) {
 	if c.visitorID == "" || time.Since(c.visitorUpdated) > 10*time.Hour {
-		if err := c.refreshVisitorID(); err != nil {
+		if err := c.refreshVisitorID(ctx); err != nil {
 			return "", err
 		}
 	}
@@ -152,8 +152,33 @@ func (c *Client) getVisitorID() (string, error) {
 }
 
 // refreshVisitorID fetches a real visitorData token from YouTube's homepage.
-func (c *Client) refreshVisitorID() error {
-	req, err := http.NewRequest(http.MethodGet, "https://www.youtube.com", nil)
+// It retries up to 3 times with exponential backoff before falling back to
+// synthetic visitor data.
+func (c *Client) refreshVisitorID(ctx context.Context) error {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(attempt) * time.Second):
+			}
+		}
+		if err := c.tryRefreshVisitorID(ctx); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+	// Final fallback: use synthetic data
+	_ = lastErr
+	c.visitorID = randomVisitorData("US")
+	c.visitorUpdated = time.Now()
+	return nil
+}
+
+func (c *Client) tryRefreshVisitorID(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://www.youtube.com", nil)
 	if err != nil {
 		return err
 	}
@@ -172,10 +197,7 @@ func (c *Client) refreshVisitorID() error {
 	const sep = "\nytcfg.set("
 	_, after, found := strings.Cut(string(data), sep)
 	if !found {
-		// Fallback: try to use a generated visitor data
-		c.visitorID = randomVisitorData("US")
-		c.visitorUpdated = time.Now()
-		return nil
+		return fmt.Errorf("ytcfg.set not found")
 	}
 
 	var value struct {
@@ -186,16 +208,12 @@ func (c *Client) refreshVisitorID() error {
 		} `json:"INNERTUBE_CONTEXT"`
 	}
 	if err := json.NewDecoder(strings.NewReader(after)).Decode(&value); err != nil {
-		c.visitorID = randomVisitorData("US")
-		c.visitorUpdated = time.Now()
-		return nil
+		return fmt.Errorf("decode ytcfg: %w", err)
 	}
 
 	vd, err := url.PathUnescape(value.InnertubeContext.Client.VisitorData)
 	if err != nil {
-		c.visitorID = randomVisitorData("US")
-		c.visitorUpdated = time.Now()
-		return nil
+		return fmt.Errorf("unescape visitorData: %w", err)
 	}
 
 	c.visitorID = vd

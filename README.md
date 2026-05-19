@@ -147,11 +147,13 @@ err := api.Download(ctx, url, opts)
 
 For multi-format downloads (`bv+ba`), progress is **automatically aggregated** across all formats — you get a single callback showing total video progress.
 
+When downloading with concurrent segment workers (`Workers > 1`), `OnProgress` still reports global byte progress against the full file size, not per-segment totals.
+
 ---
 
 ## Error Handling
 
-For single videos, `api.Download()` returns the error directly. For playlists, per-item failures are reported via the `OnError` callback so you can track which videos failed without stopping the entire batch:
+For single videos, `api.Download()` returns the error directly. For playlists, per-item failures are reported via the `OnError` callback and via the returned `PlaylistReport` so you can track which videos failed without stopping the entire batch:
 
 ```go
 opts := api.DefaultOptions()
@@ -416,6 +418,7 @@ ytgo is YouTube-only and intentionally lean. Things yt-dlp does that ytgo does *
 - **Other sites** — only YouTube (the `InfoExtractor` interface is ready for more)
 - **Throttling bypass** — bounded chunk downloading handles most throttling; `ANDROID_VR` avoids signature-based throttling
 - **String regex filters** — ytgo uses type-safe preference scoring and Go filter functions instead
+- **Structured logging** — optional `*slog.Logger` injection for library users
 
 See [`Future.md`](Future.md) for the roadmap.
 

@@ -26,6 +26,7 @@ type SegmentDownloader struct {
 	BufferPool   *sync.Pool
 	Identity     *DownloadIdentity // nil = no resume validation
 	Continue     bool              // default true; mirrors --no-continue
+	totalSize    int64             // discovered file size (used for progress)
 }
 
 // NewSegmentDownloader creates a SegmentDownloader with sensible defaults.
@@ -43,6 +44,7 @@ func NewSegmentDownloader(client *http.Client) *SegmentDownloader {
 func (sd *SegmentDownloader) DownloadToFile(ctx context.Context, url, destPath string) error {
 	// Probe server capabilities
 	totalSize, supportsRange, err := sd.probe(ctx, url)
+	sd.totalSize = totalSize
 	if err != nil || !supportsRange || totalSize <= 0 {
 		return sd.fallback(ctx, url, destPath)
 	}
@@ -184,7 +186,7 @@ func (sd *SegmentDownloader) probe(ctx context.Context, url string) (int64, bool
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return 0, false, fmt.Errorf("HEAD %d", resp.StatusCode)
+		return 0, false, &StatusError{StatusCode: resp.StatusCode, URL: url}
 	}
 
 	var size int64
@@ -211,7 +213,7 @@ func (sd *SegmentDownloader) fetchSegment(ctx context.Context, url string, seg B
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d for range %s", resp.StatusCode, seg.String())
+		return &StatusError{StatusCode: resp.StatusCode, URL: url}
 	}
 
 	var buf []byte
@@ -232,7 +234,7 @@ func (sd *SegmentDownloader) fetchSegment(ctx context.Context, url string, seg B
 			offset += int64(n)
 			newTotal := downloaded.Add(int64(n))
 			if sd.Progress != nil {
-				sd.Progress(newTotal, seg.EndByte+1) // report against this segment's end
+				sd.Progress(newTotal, sd.totalSize) // report against global file size
 			}
 		}
 		if err == io.EOF {

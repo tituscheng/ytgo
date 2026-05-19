@@ -252,7 +252,11 @@ func (e *Embedder) downloadThumbnail(ctx context.Context, thumbs []extractor.Thu
 			best = t
 		}
 	}
-	resp, err := http.Get(best.URL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, best.URL, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -264,11 +268,14 @@ func (e *Embedder) downloadThumbnail(ctx context.Context, thumbs []extractor.Thu
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	path := f.Name()
 	if _, err := io.Copy(f, resp.Body); err != nil {
+		f.Close()
+		os.Remove(path)
 		return "", err
 	}
-	return f.Name(), nil
+	f.Close()
+	return path, nil
 }
 
 func writeChaptersMetadata(chapters []extractor.Chapter) (string, error) {

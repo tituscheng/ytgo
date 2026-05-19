@@ -10,7 +10,7 @@ import (
 // Player fetches video metadata using the ANDROID_VR Innertube client.
 // If the video is age-restricted, it falls back to WEB_EMBEDDED_PLAYER.
 func (c *Client) Player(ctx context.Context, videoID string) (*PlayerResponse, error) {
-	visitorID, err := c.getVisitorID()
+	visitorID, err := c.getVisitorID(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +61,7 @@ func (c *Client) PlayerWithEnrichment(ctx context.Context, videoID string) (*Pla
 		return resp, nil
 	}
 
-	visitorID, err := c.getVisitorID()
+	visitorID, err := c.getVisitorID(ctx)
 	if err != nil {
 		return resp, nil // don't fail the whole extraction over enrichment
 	}
@@ -102,7 +102,7 @@ func (c *Client) playerWithContext(ctx context.Context, videoID string, req Play
 
 // playerEmbedded retries with the WEB_EMBEDDED_PLAYER client for age-restricted videos.
 func (c *Client) playerEmbedded(ctx context.Context, videoID string) (*PlayerResponse, error) {
-	visitorID, err := c.getVisitorID()
+	visitorID, err := c.getVisitorID(ctx)
 	if err != nil {
 		return nil, err
 	}

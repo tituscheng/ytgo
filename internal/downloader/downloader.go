@@ -3,6 +3,7 @@ package downloader
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,7 +22,39 @@ import (
 // speed. We use 10 MB - 1 byte to stay safely under the threshold.
 const defaultChunkSize = 10*1024*1024 - 1
 
+// Sentinel errors for HTTP status classification.
+var (
+	ErrForbidden   = errors.New("access forbidden")
+	ErrRateLimited = errors.New("rate limited")
+	ErrTransient   = errors.New("transient error")
+)
+
+// StatusError wraps an HTTP status code for typed error inspection.
+type StatusError struct {
+	StatusCode int
+	URL        string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("HTTP %d", e.StatusCode)
+}
+
+// Unwrap returns a sentinel error based on the status code.
+func (e *StatusError) Unwrap() error {
+	switch e.StatusCode {
+	case http.StatusForbidden:
+		return ErrForbidden
+	case http.StatusTooManyRequests:
+		return ErrRateLimited
+	case http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return ErrTransient
+	}
+	return nil
+}
+
 // ProgressFunc is called periodically with bytes downloaded and total size.
+// When downloading with Workers > 1, 'downloaded' is the global byte count
+// across all segments and 'total' is the full file size.
 type ProgressFunc func(downloaded, total int64)
 
 // Downloader downloads a single file over HTTP.
@@ -98,7 +131,7 @@ func (d *Downloader) Download(ctx context.Context, url string, w io.Writer) erro
 		}
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 			resp.Body.Close()
-			return fmt.Errorf("HTTP %d", resp.StatusCode)
+			return &StatusError{StatusCode: resp.StatusCode, URL: url}
 		}
 
 		// Wrap response body with rate limiter if configured

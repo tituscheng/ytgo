@@ -2,6 +2,7 @@
 package config
 
 import (
+	"log/slog"
 	"time"
 
 	"ytgo/pkg/ytgo"
@@ -98,6 +99,10 @@ type DownloadOptions struct {
 	// OnError is called for every video that fails during processing.
 	// Library/CLI code sets it directly; not configurable via config file.
 	OnError func(ytgo.DownloadFailure) `mapstructure:"-"`
+
+	// Logger is an optional structured logger for library use.
+	// When nil, no structured logging is emitted.
+	Logger *slog.Logger `mapstructure:"-"`
 
 	// WriteErrorLog is a file path to write structured failure JSON.
 	// Set via --write-error-log CLI flag.

@@ -319,11 +319,12 @@ func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) err
 ### Error Handling & Resilience
 - ✅ Distinguish between retryable errors (network) and fatal errors (video removed) — implemented via `isRetryable` + `OnError` callback
 - Add `--retries` and `--retry-sleep` flags
-- Implement exponential backoff for 429/503 responses
+- ✅ Implement typed HTTP errors (`StatusError`) for robust 429/503/403 classification
+- Implement exponential backoff for 429/503 responses at the HTTP client level
 
 ### Observability
 - ✅ Structured error reporting — `OnError` callback + `--write-error-log` JSON output
-- Migrate from `fmt.Fprintf(os.Stderr, ...)` to `log/slog` with structured logging
+- ✅ Migrate from `fmt.Fprintf(os.Stderr, ...)` to `log/slog` with structured logging (optional `*slog.Logger` on `DownloadOptions`)
 - Add debug-level HTTP request/response dumps (behind `--verbose`)
 - Export Prometheus metrics if running as a library in a server context
 

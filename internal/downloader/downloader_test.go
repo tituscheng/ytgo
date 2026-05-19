@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -370,4 +371,74 @@ func TestDownloadToFilePartNaming(t *testing.T) {
 	got, err := os.ReadFile(partPath)
 	require.NoError(t, err)
 	assert.Equal(t, content, got)
+}
+
+func TestStatusErrorUnwrap(t *testing.T) {
+	tests := []struct {
+		code   int
+		sentinel error
+	}{
+		{403, ErrForbidden},
+		{429, ErrRateLimited},
+		{503, ErrTransient},
+		{504, ErrTransient},
+		{200, nil},
+		{404, nil},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("status_%d", tt.code), func(t *testing.T) {
+			err := &StatusError{StatusCode: tt.code}
+			if tt.sentinel != nil {
+				assert.ErrorIs(t, err, tt.sentinel)
+			} else {
+				assert.NotErrorIs(t, err, ErrForbidden)
+				assert.NotErrorIs(t, err, ErrRateLimited)
+				assert.NotErrorIs(t, err, ErrTransient)
+			}
+		})
+	}
+}
+
+func TestSegmentProgressTotal(t *testing.T) {
+	content := []byte("0123456789abcdef")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+			w.Header().Set("Accept-Ranges", "bytes")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		var start, end int
+		fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end)
+		if end >= len(content) {
+			end = len(content) - 1
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(content)))
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write(content[start : end+1])
+	}))
+	defer srv.Close()
+
+	tmpDir := t.TempDir()
+	dest := filepath.Join(tmpDir, "test.bin")
+
+	var totals []int64
+	var totalsMu sync.Mutex
+	sd := NewSegmentDownloader(http.DefaultClient)
+	sd.Workers = 4
+	sd.ChunkSize = 4
+	sd.MaxChunkSize = 4
+	sd.Progress = func(down, tot int64) {
+		totalsMu.Lock()
+		totals = append(totals, tot)
+		totalsMu.Unlock()
+	}
+
+	err := sd.DownloadToFile(context.Background(), srv.URL, dest)
+	require.NoError(t, err)
+
+	require.Greater(t, len(totals), 0, "progress should have been called")
+	for _, tot := range totals {
+		assert.Equal(t, int64(len(content)), tot, "total should always be the full file size")
+	}
 }

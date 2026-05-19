@@ -253,11 +253,14 @@ After Tier 1-3:
 - Incomplete files are `.part` files, never confused with final files.
 - Segment progress is saved periodically, so crashes lose at most one segment's worth of work.
 - `--no-continue` and `--no-overwrites` are fully wired and working.
+- Temp file leaks on stdout and error paths are prevented by `cleanup.Stack`.
+- `PlaylistReport` gives callers visibility into which videos succeeded, failed, or were skipped.
 
 Tier 4 (job-level pipeline state) remains future work:
 - The `.ytgo` job state would track pipeline stage. If merge crashed, the next run skips extraction and download, goes straight to merge.
 - The `playlist.ytgo` cursor would mean the external app doesn't re-extract already-processed entries.
 - The external app could read `.ytgo` files to show UI progress ("3 of 10 videos done, #4 is merging").
+- `PlaylistReport` already provides per-playlist success/skip/failure summaries, which can be persisted by the caller.
 
 ---
 

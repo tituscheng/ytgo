@@ -15,12 +15,16 @@ import (
 // StreamConverter pipes an HTTP download directly into FFmpeg for audio
 // extraction, eliminating the intermediate file.
 type StreamConverter struct {
-	ffmpeg string
+	ffmpeg     string
+	downloader *downloader.Downloader
 }
 
 // NewStreamConverter creates a StreamConverter.
-func NewStreamConverter(ffmpegPath string) *StreamConverter {
-	return &StreamConverter{ffmpeg: findFFmpeg(ffmpegPath)}
+func NewStreamConverter(ffmpegPath string, d *downloader.Downloader) *StreamConverter {
+	return &StreamConverter{
+		ffmpeg:     findFFmpeg(ffmpegPath),
+		downloader: d,
+	}
 }
 
 // ExtractAudio downloads url and streams it directly through FFmpeg to
@@ -54,7 +58,10 @@ func (sc *StreamConverter) ExtractAudio(
 	// Download into the pipe in a goroutine.
 	dlErrCh := make(chan error, 1)
 	go func() {
-		d := &downloader.Downloader{Client: client}
+		d := sc.downloader
+		if d == nil {
+			d = &downloader.Downloader{Client: client}
+		}
 		err := d.Download(ctx, url, pw)
 		if err != nil {
 			_ = pw.CloseWithError(err)

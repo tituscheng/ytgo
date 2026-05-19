@@ -96,6 +96,14 @@ type DownloadFailure struct {
 	Retryable bool   `json:"retryable"`
 }
 
+// PlaylistReport summarizes the outcome of a playlist download run.
+type PlaylistReport struct {
+	Total     int
+	Succeeded int
+	Failed    []DownloadFailure
+	Skipped   int
+}
+
 // IsPlaylist returns true if the info represents a playlist.
 func (v *VideoInfo) IsPlaylist() bool {
 	return len(v.Entries) > 0

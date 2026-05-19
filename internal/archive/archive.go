@@ -1,4 +1,13 @@
 // Package archive handles the download archive file.
+//
+// Thread-safety: Archive is safe for concurrent use. All methods acquire an
+// internal mutex, so multiple goroutines may call Has/Add simultaneously.
+//
+// Crash-recovery consistency: Add writes the ID to disk before updating the
+// in-memory map. A crash after the file write but before map update is safe:
+// on restart, the ID will be re-read from disk. A crash before the file write
+// is also safe: the map update is rolled back because the function never
+// returned.
 package archive
 
 import (

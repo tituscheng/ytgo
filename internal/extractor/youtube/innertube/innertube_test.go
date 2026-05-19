@@ -400,3 +400,47 @@ func (t *testTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	return http.DefaultTransport.RoundTrip(req)
 }
+
+
+func TestRefreshVisitorIDRetry(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`<script>var ytcfg={d:function(){return window.ytconfig.data_||ytcfg.data_}};ytcfg.set({"INNERTUBE_CONTEXT":{"client":{"visitorData":"CgttdXJwaHlsYWIxMCh4q4DQBjIKCgJVUxIEGgAgKw%3D%3D"}}});</script>`))
+	}))
+	defer server.Close()
+
+	client := NewClient(10 * time.Second)
+	// Override the HTTP client to point at our test server for the homepage GET
+	client.HTTPClient = server.Client()
+	// But we need to intercept the youtube.com request. Let's use a custom transport.
+	client.HTTPClient.Transport = &retryTestTransport{server: server}
+
+	ctx := context.Background()
+	vd, err := client.getVisitorID(ctx)
+	require.NoError(t, err)
+	assert.NotEmpty(t, vd)
+	assert.GreaterOrEqual(t, callCount, 3, "should have retried at least 3 times")
+}
+
+type retryTestTransport struct {
+	server *httptest.Server
+}
+
+func (rt *retryTestTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if strings.Contains(req.URL.Host, "youtube.com") {
+		// Redirect youtube.com requests to the test server
+		newReq, err := http.NewRequestWithContext(req.Context(), req.Method, rt.server.URL, nil)
+		if err != nil {
+			return nil, err
+		}
+		newReq.Header = req.Header
+		return http.DefaultTransport.RoundTrip(newReq)
+	}
+	return http.DefaultTransport.RoundTrip(req)
+}

@@ -3,6 +3,7 @@ package youtube
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -36,8 +37,16 @@ func NewExtractor(timeout time.Duration) *Extractor {
 func (e *Extractor) Name() string { return "youtube" }
 
 // Suitable reports whether the URL is a YouTube link.
-func (e *Extractor) Suitable(url string) bool {
-	return videoIDRegex.MatchString(url) || strings.Contains(url, "youtube.com") || strings.Contains(url, "youtu.be")
+func (e *Extractor) Suitable(rawURL string) bool {
+	if videoIDRegex.MatchString(rawURL) {
+		return true
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return strings.HasSuffix(host, "youtube.com") || host == "youtu.be"
 }
 
 // Extract fetches metadata for the given YouTube URL.

@@ -483,3 +483,55 @@ All changes were minimal, preserved backward compatibility for existing call sit
 This brings the original review findings to a fully resolved state with no remaining mechanical or consistency issues in the areas audited.
 
 *Follow-up fixes committed after `1122554`.*
+
+---
+
+## 13. Latest External Review (Reliability & Production Concerns) — Findings & Resolutions
+
+After the production-readiness hardening pass, another external senior review was performed. The review was constructive and identified several important correctness, reliability, and usability issues that only surface under concurrent post-processing (`--max-postprocessors`), large playlists, or transient network conditions during metadata extraction.
+
+### Overall Reception
+The reviewer described the work as disciplined and noted that many prior classes of bugs (client inconsistency, rate limiting, archive durability, callback races) had already been addressed. The new findings focused on:
+- Cancellation propagation
+- Retry asymmetry between subtitle and core extraction paths
+- Output correctness under concurrency
+- Flag semantics completeness (`--no-overwrites`)
+- Defensive input handling
+
+### High-Severity Issues Addressed
+
+| # | Issue | Resolution (Elegant Fix) |
+|---|-------|--------------------------|
+| 3 | Multi-format downloads (`bv+ba`) used plain `errgroup.Group` instead of `WithContext` | Changed to `g, gctx := errgroup.WithContext(ctx)` in `downloadVideo`; derived context passed to `downloadFormatToFile`. Proper cancellation now propagates into concurrent format downloads. |
+| 4 | Main Innertube client (`postJSON` / Player / Playlist) had no retry logic (unlike the excellent subtitle retry system) | `postJSON` now performs up to 3 attempts with exponential backoff + jitter on transient errors (5xx, 429, network). Introduced `doPostJSON` + `isTransientInnertubeError`. Matches subtitle reliability. |
+| 5 | `runFFmpeg` wrote directly to `os.Stdout`/`os.Stderr` — severe interleaving when `MaxPostProcessors > 1` | `runFFmpeg` now accepts a `prefix`. When set, output is captured per-process and emitted serially with the prefix. Added `New*WithPrefix` constructors for `Merger`/`Converter`/`Embedder`. Engine uses prefixed versions only when `MaxPostProcessors > 1` (single-video UX unchanged). |
+| 6 | `--no-overwrites` only protected the main media file; side files (`.info.json`, `.description`, thumbnails) were always overwritten | Added `shouldWriteSideFile` helper in `Engine`. `writeSideFiles` now respects the flag for all three side-file types. |
+| 7 | No upper bound on playlist entry count (risk of huge allocations from malformed responses) | Added defensive constant `maxPlaylistEntries = 50000` in `runPlaylist`. Clear error returned for oversized playlists. |
+
+### Medium-Severity Issues Addressed
+
+| # | Issue | Resolution |
+|---|-------|------------|
+| 8 | Dead code in `parseContentRangeTotal` (impossible branch checking for `/` at end of header) | Removed the dead first branch; kept the correct fallback scanner. |
+| 9 | `viper.ReadInConfig()` errors were silently swallowed | Now emits a clear warning on stderr for parse/syntax errors (missing file remains silent, as expected). |
+| 10 | Multiple bare `os.Remove` calls in post-processing paths (temp file leaks possible) | Introduced `Engine.cleanupFile()` that logs failures at debug level via the injected `*slog.Logger`. |
+| 11 | Overly broad `Suitable()` matcher (`strings.Contains(url, "youtube.com")`) | Now uses `url.Parse` + hostname suffix check (`HasSuffix(host, "youtube.com") || host == "youtu.be"`). |
+| 12 | Thumbnail downloads performed no `Content-Type` validation | Added check in `Embedder.downloadThumbnail` (and side-file path) that `Content-Type` must start with `image/`. |
+
+### Low-Severity Polish Applied
+- `log()` helper now has better context awareness in some paths.
+- `writeFileAtomic` (subtitles) fsync consideration noted (future).
+- Playlist range validation and test coverage gaps documented as non-blocking follow-ups.
+
+### Design Philosophy of the Fixes
+All changes followed the project's established principles:
+- Minimal, targeted diffs
+- Reuse of existing patterns (`errgroup.WithContext`, `New*WithClient` style constructors, the injected logger, `MaxPostProcessors` config)
+- No behavior change on the happy single-video path
+- Full `-race` cleanliness after each logical group
+
+**Verification:** `go build ./... && go test -race -count=1 ./...` (all packages, including slow Innertube tests).
+
+These fixes close the last major classes of issues identified in the external review and bring ytgo to a significantly stronger position for production playlist workloads.
+
+*All fixes committed together after documentation updates.*

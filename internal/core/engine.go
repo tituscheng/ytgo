@@ -289,7 +289,9 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 		}
 		downloaded[0] = finalPath
 	} else {
-		var g errgroup.Group
+		// Derive a cancellable context so that SIGINT / parent cancellation
+		// properly aborts all concurrent format downloads (Issue 3).
+		g, gctx := errgroup.WithContext(ctx)
 		for i, f := range selected {
 			i, f := i, f
 			g.Go(func() error {
@@ -305,7 +307,7 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 					temps.Push(partPath)
 					temps.Push(finalPath)
 				}
-				if err := e.downloadFormatToFile(ctx, info, f, partPath, i+1, len(selected), pa); err != nil {
+				if err := e.downloadFormatToFile(gctx, info, f, partPath, i+1, len(selected), pa); err != nil {
 					e.reportFailure(ytgo.DownloadFailure{
 						VideoID:   info.ID,
 						Title:     info.Title,
@@ -352,7 +354,7 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 
 	finalPath := outputPath
 	if len(downloaded) > 1 || e.Config.MergeOutputFormat != "" || isStdout {
-		merger := postprocessor.NewMerger(e.Config.FFmpegLocation)
+		merger := e.makeMerger(info)
 		merged, err := merger.Run(ctx, downloaded, outputPath, e.Config.MergeOutputFormat)
 		if err != nil {
 			e.reportFailure(ytgo.DownloadFailure{
@@ -367,7 +369,7 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 		finalPath = merged
 		for _, p := range downloaded {
 			if p != finalPath {
-				os.Remove(p)
+				e.cleanupFile(p)
 			}
 		}
 	}
@@ -378,7 +380,7 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 	// aggregation) are intentionally reduced compared to normal downloads.
 	// The core download still uses the full segmented + resume machinery.
 	if e.Config.ExtractAudio {
-		conv := postprocessor.NewConverter(e.Config.FFmpegLocation)
+		conv := e.makeConverter(info)
 		converted, err := conv.ExtractAudio(ctx, finalPath, e.Config.AudioFormat, e.Config.AudioQuality)
 		if err != nil {
 			e.reportFailure(ytgo.DownloadFailure{
@@ -391,7 +393,7 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 			return fmt.Errorf("audio extraction failed: %w", err)
 		}
 		if !e.Config.KeepVideo && finalPath != converted {
-			os.Remove(finalPath)
+			e.cleanupFile(finalPath)
 		}
 		finalPath = converted
 	}
@@ -402,7 +404,7 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 		if e.Transport != nil {
 			embedClient = &http.Client{Transport: e.Transport, Timeout: 30 * time.Second}
 		}
-		embedder := postprocessor.NewEmbedderWithClient(e.Config.FFmpegLocation, embedClient)
+		embedder := e.makeEmbedder(info, embedClient)
 		if err := embedder.Run(ctx, finalPath, info, postprocessor.EmbedOptions{
 			Metadata:  e.Config.EmbedMetadata,
 			Thumbnail: e.Config.EmbedThumbnail,
@@ -440,7 +442,7 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 		}
 		defer f.Close()
 		_, err = io.Copy(os.Stdout, f)
-		os.Remove(finalPath)
+		e.cleanupFile(finalPath)
 		return err
 	}
 
@@ -458,6 +460,12 @@ type videoTask struct {
 }
 
 func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) (*ytgo.PlaylistReport, error) {
+	// Defensive limit against pathological or malicious playlist responses (Issue 7).
+	const maxPlaylistEntries = 50000
+	if len(info.Entries) > maxPlaylistEntries {
+		return nil, fmt.Errorf("playlist too large (%d entries, maximum supported is %d)", len(info.Entries), maxPlaylistEntries)
+	}
+
 	color.Cyan("Playlist: %s (%d entries)", info.PlaylistTitle, len(info.Entries))
 
 	// Apply playlist range filters
@@ -806,27 +814,83 @@ func (e *Engine) buildOutputPath(info *extractor.VideoInfo, selected []extractor
 }
 
 func (e *Engine) writeSideFiles(ctx context.Context, info *extractor.VideoInfo) error {
+	// Respect --no-overwrites for all side files (Issue 6).
+	// Mirrors the protection already applied to the main media file.
 	if e.Config.WriteInfoJSON {
 		path := template.BuildPath(e.Config.OutputTemplate, info, "info.json", e.Config.Paths)
-		data, _ := json.MarshalIndent(info, "", "  ")
-		if err := os.WriteFile(path, data, 0644); err != nil {
-			return err
+		if e.shouldWriteSideFile(path) {
+			data, _ := json.MarshalIndent(info, "", "  ")
+			if err := os.WriteFile(path, data, 0644); err != nil {
+				return err
+			}
 		}
 	}
 	if e.Config.WriteDescription {
 		path := template.BuildPath(e.Config.OutputTemplate, info, "description", e.Config.Paths)
-		if err := os.WriteFile(path, []byte(info.Description), 0644); err != nil {
-			return err
+		if e.shouldWriteSideFile(path) {
+			if err := os.WriteFile(path, []byte(info.Description), 0644); err != nil {
+				return err
+			}
 		}
 	}
 	if e.Config.WriteThumbnail && len(info.Thumbnails) > 0 {
 		path := template.BuildPath(e.Config.OutputTemplate, info, "jpg", e.Config.Paths)
-		thumbClient := &http.Client{Transport: e.Transport, Timeout: 30 * time.Second}
-		if err := postprocessor.DownloadThumbnail(ctx, thumbClient, info.Thumbnails, path); err != nil {
-			return err
+		if e.shouldWriteSideFile(path) {
+			thumbClient := &http.Client{Transport: e.Transport, Timeout: 30 * time.Second}
+			if err := postprocessor.DownloadThumbnail(ctx, thumbClient, info.Thumbnails, path); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+// shouldWriteSideFile returns true unless --no-overwrites is set and the
+// target file already exists on disk.
+func (e *Engine) shouldWriteSideFile(path string) bool {
+	if !e.Config.NoOverwrites {
+		return true
+	}
+	_, err := os.Stat(path)
+	return os.IsNotExist(err)
+}
+
+// cleanupFile removes a file and logs at debug level on failure (Issue 10).
+// Non-fatal; used for best-effort temp file removal.
+func (e *Engine) cleanupFile(p string) {
+	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+		e.log("failed to remove temp file",
+			slog.String("path", p),
+			slog.String("error", err.Error()))
+	}
+}
+
+// makeMerger returns a Merger, using a prefixed version when concurrent
+// post-processing is enabled to prevent ffmpeg output interleaving.
+func (e *Engine) makeMerger(info *extractor.VideoInfo) *postprocessor.Merger {
+	if e.Config.MaxPostProcessors > 1 {
+		return postprocessor.NewMergerWithPrefix(e.Config.FFmpegLocation, fmt.Sprintf("[%s] ", info.ID))
+	}
+	return postprocessor.NewMerger(e.Config.FFmpegLocation)
+}
+
+// makeConverter is the equivalent for audio extraction.
+func (e *Engine) makeConverter(info *extractor.VideoInfo) *postprocessor.Converter {
+	if e.Config.MaxPostProcessors > 1 {
+		return postprocessor.NewConverterWithPrefix(e.Config.FFmpegLocation, fmt.Sprintf("[%s] ", info.ID))
+	}
+	return postprocessor.NewConverter(e.Config.FFmpegLocation)
+}
+
+// makeEmbedder is the equivalent for embed operations.
+func (e *Engine) makeEmbedder(info *extractor.VideoInfo, client *http.Client) *postprocessor.Embedder {
+	if e.Config.MaxPostProcessors > 1 {
+		return postprocessor.NewEmbedderWithClientAndPrefix(e.Config.FFmpegLocation, client, fmt.Sprintf("[%s] ", info.ID))
+	}
+	if client != nil {
+		return postprocessor.NewEmbedderWithClient(e.Config.FFmpegLocation, client)
+	}
+	return postprocessor.NewEmbedder(e.Config.FFmpegLocation)
 }
 
 func (e *Engine) writeSubtitles(ctx context.Context, info *extractor.VideoInfo) error {

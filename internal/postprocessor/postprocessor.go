@@ -2,6 +2,7 @@
 package postprocessor
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -35,11 +36,38 @@ func findFFmpeg(preferred string) string {
 }
 
 // runFFmpeg executes an ffmpeg command.
-func runFFmpeg(ctx context.Context, ffmpeg string, args ...string) error {
+// When prefix is non-empty (used in concurrent post-processing with MaxPostProcessors > 1),
+// stderr/stdout are captured and emitted with the prefix to prevent interleaving (Issue 5).
+// When prefix == "", the classic live-to-stderr behavior is preserved for single-video downloads.
+func runFFmpeg(ctx context.Context, ffmpeg string, prefix string, args ...string) error {
 	cmd := exec.CommandContext(ctx, ffmpeg, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+
+	if prefix == "" {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd.Run()
+	}
+
+	// Capture output so multiple concurrent ffmpeg invocations don't interleave on the terminal.
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	err := cmd.Run()
+
+	writePrefixed := func(buf *bytes.Buffer) {
+		if buf.Len() == 0 {
+			return
+		}
+		for _, line := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+			fmt.Fprintf(os.Stderr, "%s%s\n", prefix, line)
+		}
+	}
+
+	writePrefixed(&stdoutBuf)
+	writePrefixed(&stderrBuf)
+
+	return err
 }
 
 // isMP4Family reports whether the extension is an MP4/M4A/MOV container.
@@ -54,11 +82,18 @@ func isMP4Family(ext string) bool {
 // Merger merges separate audio and video files.
 type Merger struct {
 	ffmpeg string
+	prefix string // non-empty only when concurrent post-processing is enabled (prevents interleaving)
 }
 
-// NewMerger creates a Merger.
+// NewMerger creates a Merger (no output prefix).
 func NewMerger(ffmpegPath string) *Merger {
 	return &Merger{ffmpeg: findFFmpeg(ffmpegPath)}
+}
+
+// NewMergerWithPrefix creates a Merger that prefixes all ffmpeg output lines.
+// Used when MaxPostProcessors > 1 to avoid interleaved terminal output.
+func NewMergerWithPrefix(ffmpegPath, prefix string) *Merger {
+	return &Merger{ffmpeg: findFFmpeg(ffmpegPath), prefix: prefix}
 }
 
 // Run merges the given input files into outputPath.
@@ -91,7 +126,7 @@ func (m *Merger) Run(ctx context.Context, inputs []string, outputPath, forceExt 
 	}
 	args = append(args, outputPath)
 
-	if err := runFFmpeg(ctx, m.ffmpeg, args...); err != nil {
+	if err := runFFmpeg(ctx, m.ffmpeg, m.prefix, args...); err != nil {
 		return "", fmt.Errorf("ffmpeg merge: %w", err)
 	}
 	return outputPath, nil
@@ -100,11 +135,17 @@ func (m *Merger) Run(ctx context.Context, inputs []string, outputPath, forceExt 
 // Converter extracts or converts audio/video.
 type Converter struct {
 	ffmpeg string
+	prefix string
 }
 
-// NewConverter creates a Converter.
+// NewConverter creates a Converter (no output prefix).
 func NewConverter(ffmpegPath string) *Converter {
 	return &Converter{ffmpeg: findFFmpeg(ffmpegPath)}
+}
+
+// NewConverterWithPrefix creates a Converter that prefixes ffmpeg output.
+func NewConverterWithPrefix(ffmpegPath, prefix string) *Converter {
+	return &Converter{ffmpeg: findFFmpeg(ffmpegPath), prefix: prefix}
 }
 
 // ExtractAudio extracts audio to the requested format.
@@ -159,7 +200,7 @@ func (c *Converter) ExtractAudio(ctx context.Context, input, audioFormat, qualit
 	if isMP4Family(ext) {
 		args = append(args, "-movflags", "+faststart")
 	}
-	if err := runFFmpeg(ctx, c.ffmpeg, args...); err != nil {
+	if err := runFFmpeg(ctx, c.ffmpeg, c.prefix, args...); err != nil {
 		return "", fmt.Errorf("ffmpeg convert: %w", err)
 	}
 	return output, nil
@@ -177,6 +218,7 @@ type EmbedOptions struct {
 type Embedder struct {
 	ffmpeg string
 	client *http.Client // optional; if set, used for thumbnail downloads (shares tuned transport)
+	prefix string
 }
 
 // NewEmbedder creates an Embedder using a default short-lived HTTP client for thumbnails.
@@ -190,6 +232,16 @@ func NewEmbedderWithClient(ffmpegPath string, client *http.Client) *Embedder {
 	return &Embedder{
 		ffmpeg: findFFmpeg(ffmpegPath),
 		client: client,
+	}
+}
+
+// NewEmbedderWithClientAndPrefix creates an Embedder with both a custom client and output prefix
+// (used to avoid interleaving when MaxPostProcessors > 1).
+func NewEmbedderWithClientAndPrefix(ffmpegPath string, client *http.Client, prefix string) *Embedder {
+	return &Embedder{
+		ffmpeg: findFFmpeg(ffmpegPath),
+		client: client,
+		prefix: prefix,
 	}
 }
 
@@ -241,7 +293,7 @@ func (e *Embedder) Run(ctx context.Context, path string, info *extractor.VideoIn
 	tmpPath := path + ".tmp"
 	args = append(args, tmpPath)
 
-	if err := runFFmpeg(ctx, e.ffmpeg, args...); err != nil {
+	if err := runFFmpeg(ctx, e.ffmpeg, e.prefix, args...); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("ffmpeg embed: %w", err)
 	}
@@ -283,6 +335,10 @@ func (e *Embedder) downloadThumbnail(ctx context.Context, thumbs []extractor.Thu
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if ct != "" && !strings.HasPrefix(ct, "image/") {
+		return "", fmt.Errorf("unexpected content-type for thumbnail: %s", ct)
 	}
 	f, err := os.CreateTemp("", "thumb-*.jpg")
 	if err != nil {

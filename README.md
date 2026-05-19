@@ -31,8 +31,8 @@ If you need sponsorblock, 1000+ site extractors, or `--cookies-from-browser`, yt
 - **Format selection** with yt-dlp-style selectors (`bv*+ba/best`, `best[height<=720]`, itag, extension)
 - **Format preferences** — type-safe codec/container scoring (`PreferVideoCodec: "avc1"`) instead of regex DSL
 - **HTTP download** with bounded chunk segmentation (~10 MB), concurrent workers, resume support, and progress spinners
-- **Post-processing** via FFmpeg: merge, audio extraction, metadata/thumbnail/chapter embedding
-- **Subtitles**: download manual & auto-generated captions (SRT/VTT). Production-grade fetch with retries + jittered backoff, server `Retry-After` honored, atomic writes (`.tmp` → rename), forced JSON3 source format, region-code fallback (e.g. `en` → `en-US`), and per-language failures surfaced via the structured error log.
+- **Post-processing** via FFmpeg: merge, audio extraction (`-x`), metadata/thumbnail/chapter embedding. Safe concurrent execution (`--max-postprocessors`) with non-interleaved output and proper context cancellation.
+- **Subtitles & Metadata Extraction**: Production-grade retry with exponential backoff + jitter for both subtitle tracks and core Innertube metadata extraction (Player/Playlist). Server `Retry-After` honored where applicable, atomic side-file writes, and structured failure reporting.
 - **Output templates**: `%(title)s`, `%(upload_date>%Y-%m-%d)s`, `%(playlist_index)s`, etc.
 - **Resume support** — identity-scoped segment-level resume, `.part` temp files, automatic re-extraction on expired URLs
 - **Download archive** to skip already-downloaded videos
@@ -423,7 +423,17 @@ ytgo is YouTube-only and intentionally lean. Things yt-dlp does that ytgo does *
 
 See [`Future.md`](Future.md) for the roadmap.
 
+### Reliability & Production Notes
+
+- **Concurrent post-processing** (`--max-postprocessors > 1`) now produces clean, non-interleaved FFmpeg output.
+- **Metadata extraction** (Innertube) now has the same retry quality previously reserved for subtitles.
+- **`--no-overwrites`** consistently protects the main media file *and* all side files (`.info.json`, `.description`, thumbnails).
+- **Large playlists** are protected by a defensive upper bound (50k entries) to prevent pathological memory usage.
+- Context cancellation is respected across multi-format downloads and post-processing stages.
+
 ---
+
+## Known Limitations
 
 ## Adding New Sites
 

@@ -140,8 +140,10 @@ func run(cmd *cobra.Command, args []string) error {
 		viper.SetConfigFile(configFile)
 	}
 	if err := viper.ReadInConfig(); err != nil {
-		// Ignore not found and parse errors; use defaults
-		_ = err
+		// Only warn on real parse/syntax problems. Missing config file is normal.
+		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+			fmt.Fprintf(os.Stderr, "warning: failed to read config file: %v (using defaults)\n", err)
+		}
 	}
 	_ = viper.Unmarshal(&cfg)
 

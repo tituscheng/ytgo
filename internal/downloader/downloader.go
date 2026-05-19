@@ -200,17 +200,7 @@ func (d *Downloader) Download(ctx context.Context, url string, w io.Writer) erro
 }
 
 func parseContentRangeTotal(cr string) int64 {
-	// bytes 1000-2000/3000
-	if i := len(cr) - 1; i >= 0 {
-		if j := len(cr) - 1; j >= 0 && cr[j] == '/' {
-			if j+1 < len(cr) {
-				if n, err := strconv.ParseInt(cr[j+1:], 10, 64); err == nil {
-					return n
-				}
-			}
-		}
-	}
-	// fallback: find last slash
+	// bytes 1000-2000/3000 — find the total after the last slash.
 	parts := []rune(cr)
 	for i := len(parts) - 1; i >= 0; i-- {
 		if parts[i] == '/' {

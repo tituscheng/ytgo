@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -109,8 +110,51 @@ func defaultPlaybackContext() *PlaybackContext {
 	}
 }
 
-// postJSON sends a POST request to the given Innertube endpoint and unmarshals the response.
+// postJSON sends a POST request to the given Innertube endpoint.
+// It retries on transient errors (network failures, 5xx, 429) with
+// exponential backoff — matching the reliability of the subtitle downloader
+// (Issue 4).
 func (c *Client) postJSON(ctx context.Context, endpoint string, body any) ([]byte, error) {
+	const maxAttempts = 3
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		resp, err := c.doPostJSON(ctx, endpoint, body)
+		if err == nil {
+			return resp, nil
+		}
+
+		lastErr = err
+
+		// Only retry on transient conditions
+		if !isTransientInnertubeError(err) {
+			return nil, err
+		}
+
+		if attempt == maxAttempts {
+			break
+		}
+
+		// Simple exponential backoff with jitter (1s, 2s, 4s base)
+		backoff := time.Duration(1<<uint(attempt-1)) * time.Second
+		jitter := time.Duration(rand.Int63n(int64(backoff) / 2))
+		wait := backoff + jitter
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	return nil, fmt.Errorf("innertube request failed after %d attempts: %w", maxAttempts, lastErr)
+}
+
+// doPostJSON performs a single Innertube POST (no retry).
+func (c *Client) doPostJSON(ctx context.Context, endpoint string, body any) ([]byte, error) {
 	// Match kkdai: use empty key for ANDROID_VR to avoid bot detection.
 	url := fmt.Sprintf("%s/%s?key=", apiBaseURL, endpoint)
 
@@ -152,6 +196,27 @@ func (c *Client) postJSON(ctx context.Context, endpoint string, body any) ([]byt
 	}
 
 	return io.ReadAll(resp.Body)
+}
+
+// isTransientInnertubeError decides whether a postJSON error is worth retrying.
+func isTransientInnertubeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Network-level transient errors
+	var netErr interface{ Temporary() bool }
+	if errors.As(err, &netErr) && netErr.Temporary() {
+		return true
+	}
+
+	// Check status codes embedded in the error string (simple but effective)
+	msg := err.Error()
+	if strings.Contains(msg, "unexpected status 5") ||
+		strings.Contains(msg, "unexpected status 429") ||
+		strings.Contains(msg, "unexpected status 503") {
+		return true
+	}
+	return false
 }
 
 // getVisitorID returns a valid visitor ID, fetching one from YouTube if needed.

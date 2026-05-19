@@ -31,6 +31,8 @@ type Downloader struct {
 	BufferPool *sync.Pool
 	Workers    int // max concurrent segments; <=1 means sequential chunked
 	Limiter    *limiter.GlobalLimiter
+	Identity   *DownloadIdentity // nil = no resume validation
+	Continue   bool              // default true; mirrors --no-continue
 }
 
 // New creates a Downloader with sensible defaults.
@@ -58,6 +60,8 @@ func (d *Downloader) DownloadToFile(ctx context.Context, url, destPath string) e
 	sd.ChunkSize = defaultChunkSize
 	sd.Progress = d.Progress
 	sd.BufferPool = d.BufferPool
+	sd.Identity = d.Identity
+	sd.Continue = d.Continue
 	return sd.DownloadToFile(ctx, url, destPath)
 }
 

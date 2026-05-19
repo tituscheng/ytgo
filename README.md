@@ -33,6 +33,7 @@ If you need sponsorblock, 1000+ site extractors, or `--cookies-from-browser`, yt
 - **Post-processing** via FFmpeg: merge, audio extraction, metadata/thumbnail/chapter embedding
 - **Subtitles**: download manual & auto-generated captions, convert JSON3 → SRT/VTT
 - **Output templates**: `%(title)s`, `%(upload_date>%Y-%m-%d)s`, `%(playlist_index)s`, etc.
+- **Resume support** — identity-scoped segment-level resume, `.part` temp files, automatic re-extraction on expired URLs
 - **Download archive** to skip already-downloaded videos
 - **Stdout output** (`-o -`) for piping
 - **Config file** support (YAML)
@@ -90,6 +91,79 @@ go build -o ytgo .
 
 # Pipe subtitle to stdout
 ./ytgo --skip-download --write-auto-subs --sub-langs en --sub-format vtt -o - "URL"
+```
+
+---
+
+## Resume Support
+
+ytgo has **segment-level resume** that is architecturally more robust than yt-dlp's single-file byte-counting:
+
+| Feature | ytgo | yt-dlp |
+|---|---|---|
+| Granularity | Per-segment (bounded ~10 MB chunks) | Single-file byte offset |
+| Temp file | `.part` → atomic rename on success | `.part` |
+| Resume key | `(VideoID, FormatID, ContentLength)` — survives URL changes | File path only |
+| URL expiry recovery | ✅ Re-extracts fresh URL on 403, continues | ❌ `.part` becomes useless |
+| Integrity check | `clen=` from YouTube URL validates expected size | None |
+| Periodic save | After every completed segment | Only on error/exit |
+| Format-change safety | Discards stale state if `--format` changes | No protection |
+
+**How it works:**
+- Downloads write to `filename.part` with a `filename.part.segments` JSON sidecar tracking completed segments
+- Interrupted downloads resume from the last completed segment, not from byte 0
+- If the YouTube presigned URL expires (403), ytgo automatically re-extracts the video and continues with the fresh URL
+- On success, the `.part` file is atomically renamed to the final name and the sidecar is removed
+
+**CLI examples:**
+
+```bash
+# Default: resume is enabled. Interrupt with Ctrl+C and re-run — it continues.
+./ytgo -f "best" "https://www.youtube.com/watch?v=..."
+
+# Disable resume — start fresh even if a partial download exists
+./ytgo --no-continue "URL"
+
+# Skip existing files without re-downloading
+./ytgo --no-overwrites "URL"
+```
+
+**Library example:**
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+
+    "ytgo/pkg/ytgo/api"
+)
+
+func main() {
+    opts := api.DefaultOptions()
+    opts.Format = "best"
+    opts.OutputTemplate = "%(title)s.%(ext)s"
+
+    // Resume is enabled by default (ContinuePartial = true).
+    // If the download is interrupted, re-run the same code and it resumes
+    // from the last completed segment.
+    err := api.Download(context.Background(), "URL", opts)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // --- Optional flags ---
+
+    // Force a fresh download even if a partial file exists
+    opts.ContinuePartial = false
+
+    // Skip already-downloaded files
+    opts.NoOverwrites = true
+
+    // The engine handles everything: .part temp files, .segments sidecars,
+    // periodic saves, identity validation, and automatic re-extraction on 403.
+}
 ```
 
 ---
@@ -152,6 +226,10 @@ sub-langs:
 ---
 
 ## Library Usage
+
+See the **Resume Support** section above for a complete library example with resume options.
+
+Quick start:
 
 ```go
 package main

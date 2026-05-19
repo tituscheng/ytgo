@@ -159,6 +159,16 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 		return nil, err
 	}
 
+	// --no-overwrites: skip if final file already exists
+	if e.Config.NoOverwrites && !isStdout {
+		if _, err := os.Stat(outputPath); err == nil {
+			if !e.Config.Quiet {
+				color.Yellow("[%s] %s: file already exists, skipping", info.ID, info.Title)
+			}
+			return nil, nil
+		}
+	}
+
 	// Streaming audio extraction: when -x is set and we have a single audio
 	// format, pipe the download directly into FFmpeg instead of saving an
 	// intermediate file.
@@ -172,14 +182,21 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 
 	downloaded := make([]string, len(selected))
 	if len(selected) == 1 {
-		partPath := outputPath
+		partPath := outputPath + ".part"
+		finalPath := outputPath
 		if isStdout {
-			partPath = filepath.Join(os.TempDir(), filepath.Base(partPath))
+			partPath = filepath.Join(os.TempDir(), filepath.Base(finalPath)) + ".part"
+			finalPath = filepath.Join(os.TempDir(), filepath.Base(finalPath))
 		}
-		if err := e.downloadFormatToFile(ctx, selected[0], partPath, 1, 1); err != nil {
+		if err := e.downloadFormatToFile(ctx, info, selected[0], partPath, 1, 1); err != nil {
 			return nil, fmt.Errorf("download format %s failed: %w", selected[0].FormatID, err)
 		}
-		downloaded[0] = partPath
+		if !isStdout {
+			if err := os.Rename(partPath, finalPath); err != nil {
+				return nil, fmt.Errorf("rename part file: %w", err)
+			}
+		}
+		downloaded[0] = finalPath
 	} else {
 		var g errgroup.Group
 		for i, f := range selected {
@@ -189,14 +206,21 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 				if ext == "" {
 					ext = "mp4"
 				}
-				partPath := fmt.Sprintf("%s.f%s.%s", strings.TrimSuffix(outputPath, filepath.Ext(outputPath)), f.FormatID, ext)
+				partPath := fmt.Sprintf("%s.f%s.%s.part", strings.TrimSuffix(outputPath, filepath.Ext(outputPath)), f.FormatID, ext)
+				finalPath := fmt.Sprintf("%s.f%s.%s", strings.TrimSuffix(outputPath, filepath.Ext(outputPath)), f.FormatID, ext)
 				if isStdout {
-					partPath = filepath.Join(os.TempDir(), filepath.Base(partPath))
+					partPath = filepath.Join(os.TempDir(), filepath.Base(finalPath)) + ".part"
+					finalPath = filepath.Join(os.TempDir(), filepath.Base(finalPath))
 				}
-				if err := e.downloadFormatToFile(ctx, f, partPath, i+1, len(selected)); err != nil {
+				if err := e.downloadFormatToFile(ctx, info, f, partPath, i+1, len(selected)); err != nil {
 					return fmt.Errorf("download format %s failed: %w", f.FormatID, err)
 				}
-				downloaded[i] = partPath
+				if !isStdout {
+					if err := os.Rename(partPath, finalPath); err != nil {
+						return fmt.Errorf("rename part file: %w", err)
+					}
+				}
+				downloaded[i] = finalPath
 				return nil
 			})
 		}
@@ -407,7 +431,7 @@ func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) err
 	return postprocErr
 }
 
-func (e *Engine) downloadFormatToFile(ctx context.Context, f extractor.Format, dest string, current, total int) error {
+func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.VideoInfo, f extractor.Format, dest string, current, total int) error {
 	// For concurrent downloads (total > 1), skip the interactive spinner to
 	// avoid stderr interleaving. Instead, log start and completion.
 	concurrent := total > 1
@@ -424,11 +448,19 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, f extractor.Format, d
 		}()
 	}
 
+	clen := downloader.ParseContentLengthFromURL(f.URL)
+
 	// Use a local Downloader instance to avoid race on the Progress callback
 	d := &downloader.Downloader{
 		Client:     e.Downloader.Client,
 		BufferPool: e.Downloader.BufferPool,
 		Workers:    e.Downloader.Workers,
+		Identity: &downloader.DownloadIdentity{
+			VideoID:       info.ID,
+			FormatID:      f.FormatID,
+			ContentLength: clen,
+		},
+		Continue: e.Config.ContinuePartial,
 		Progress: func(down, tot int64) {
 			if s != nil && tot > 0 {
 				pct := float64(down) / float64(tot) * 100
@@ -437,7 +469,47 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, f extractor.Format, d
 		},
 	}
 
-	return d.DownloadToFile(ctx, f.URL, dest)
+	err := d.DownloadToFile(ctx, f.URL, dest)
+	if err != nil && isForbidden(err) {
+		if !e.Config.Quiet {
+			color.Yellow("[%s] URL expired (403), re-extracting...", info.ID)
+		}
+		fresh, reextractErr := e.reextract(ctx, info)
+		if reextractErr == nil {
+			for _, freshFormat := range fresh.Formats {
+				if freshFormat.FormatID == f.FormatID {
+					// Retry with fresh URL (same identity, so resume state is preserved)
+					return d.DownloadToFile(ctx, freshFormat.URL, dest)
+				}
+			}
+		}
+	}
+	return err
+}
+
+// isForbidden reports whether an error indicates an HTTP 403 response.
+func isForbidden(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "403")
+}
+
+// reextract fetches fresh metadata for a video using the registered extractors.
+func (e *Engine) reextract(ctx context.Context, info *extractor.VideoInfo) (*extractor.VideoInfo, error) {
+	url := info.WebpageURL
+	if url == "" {
+		url = info.OriginalURL
+	}
+	if url == "" {
+		return nil, fmt.Errorf("no URL available for re-extraction")
+	}
+	for _, ext := range e.Extractors {
+		if ext.Suitable(url) {
+			return ext.Extract(ctx, url)
+		}
+	}
+	return nil, fmt.Errorf("no extractor found for re-extraction")
 }
 
 func (e *Engine) buildOutputPath(info *extractor.VideoInfo, selected []extractor.Format) (string, error) {

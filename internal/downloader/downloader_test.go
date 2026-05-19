@@ -133,3 +133,241 @@ func TestParseContentRangeTotal(t *testing.T) {
 	assert.Equal(t, int64(12345), parseContentRangeTotal("bytes 100-200/12345"))
 	assert.Equal(t, int64(-1), parseContentRangeTotal("invalid"))
 }
+
+// === New resume-system tests ===
+
+func TestParseContentLengthFromURL(t *testing.T) {
+	assert.Equal(t, int64(12345678), ParseContentLengthFromURL("https://example.com/video?clen=12345678&expire=123"))
+	assert.Equal(t, int64(42), ParseContentLengthFromURL("https://example.com/video?foo=bar&clen=42"))
+	assert.Equal(t, int64(0), ParseContentLengthFromURL("https://example.com/video?foo=bar"))
+	assert.Equal(t, int64(0), ParseContentLengthFromURL(""))
+	assert.Equal(t, int64(0), ParseContentLengthFromURL("https://example.com/video?clen=abc"))
+}
+
+func TestResumeStateValidate(t *testing.T) {
+	rs := &ResumeState{
+		VideoID:       "abc123",
+		FormatID:      "251",
+		ContentLength: 1000,
+		FileSize:      1000,
+	}
+
+	// Exact match
+	assert.True(t, rs.Validate(DownloadIdentity{VideoID: "abc123", FormatID: "251", ContentLength: 1000}, "", 1000))
+
+	// Mismatched VideoID
+	assert.False(t, rs.Validate(DownloadIdentity{VideoID: "xyz789", FormatID: "251", ContentLength: 1000}, "", 1000))
+
+	// Mismatched FormatID
+	assert.False(t, rs.Validate(DownloadIdentity{VideoID: "abc123", FormatID: "137", ContentLength: 1000}, "", 1000))
+
+	// Mismatched ContentLength (both non-zero)
+	assert.False(t, rs.Validate(DownloadIdentity{VideoID: "abc123", FormatID: "251", ContentLength: 2000}, "", 1000))
+
+	// Zero ContentLength in identity → skip check
+	assert.True(t, rs.Validate(DownloadIdentity{VideoID: "abc123", FormatID: "251", ContentLength: 0}, "", 1000))
+
+	// Zero ContentLength in state → skip check
+	rs2 := &ResumeState{VideoID: "abc123", FormatID: "251", ContentLength: 0, FileSize: 1000}
+	assert.True(t, rs2.Validate(DownloadIdentity{VideoID: "abc123", FormatID: "251", ContentLength: 9999}, "", 1000))
+
+	// Mismatched FileSize
+	assert.False(t, rs.Validate(DownloadIdentity{VideoID: "abc123", FormatID: "251", ContentLength: 1000}, "", 2000))
+}
+
+func TestSegmentDownloaderNoContinue(t *testing.T) {
+	content := []byte("abcdefghijklmnopqrstuvwxyz")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			var start, end int
+			fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end)
+			if start >= len(content) {
+				w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			if end >= len(content) {
+				end = len(content) - 1
+			}
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(content)))
+			w.WriteHeader(http.StatusPartialContent)
+			w.Write(content[start : end+1])
+			return
+		}
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		w.WriteHeader(http.StatusOK)
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	tmpDir := t.TempDir()
+	dest := filepath.Join(tmpDir, "test.bin")
+
+	// First download: create partial file and resume state
+	sd := NewSegmentDownloader(http.DefaultClient)
+	sd.ChunkSize = 5
+	sd.MaxChunkSize = 5
+	sd.Workers = 1
+	sd.Identity = &DownloadIdentity{VideoID: "v1", FormatID: "f1"}
+	err := sd.DownloadToFile(context.Background(), srv.URL, dest)
+	require.NoError(t, err)
+
+	// Verify file exists and sidecar is gone
+	require.FileExists(t, dest)
+	require.NoFileExists(t, resumePath(dest))
+
+	// Now corrupt the file, recreate sidecar, and verify --no-continue wipes them
+	require.NoError(t, os.WriteFile(dest, []byte("xxx"), 0644))
+	stale := &ResumeState{DestPath: dest, VideoID: "v1", FormatID: "f1", FileSize: int64(len(content)), Completed: []ByteRange{{Index: 0, StartByte: 0, EndByte: 4}}}
+	require.NoError(t, stale.Save())
+
+	sd2 := NewSegmentDownloader(http.DefaultClient)
+	sd2.ChunkSize = 5
+	sd2.MaxChunkSize = 5
+	sd2.Workers = 1
+	sd2.Identity = &DownloadIdentity{VideoID: "v1", FormatID: "f1"}
+	sd2.Continue = false
+	err = sd2.DownloadToFile(context.Background(), srv.URL, dest)
+	require.NoError(t, err)
+
+	// Should be complete fresh download, not resumed
+	got, err := os.ReadFile(dest)
+	require.NoError(t, err)
+	assert.Equal(t, content, got)
+	require.NoFileExists(t, resumePath(dest))
+}
+
+func TestSegmentDownloaderIdentityMismatch(t *testing.T) {
+	content := []byte("abcdefghijklmnopqrstuvwxyz")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			var start, end int
+			fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end)
+			if start >= len(content) {
+				w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			if end >= len(content) {
+				end = len(content) - 1
+			}
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(content)))
+			w.WriteHeader(http.StatusPartialContent)
+			w.Write(content[start : end+1])
+			return
+		}
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		w.WriteHeader(http.StatusOK)
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	tmpDir := t.TempDir()
+	dest := filepath.Join(tmpDir, "test.bin")
+
+	// Create a stale resume state with wrong FormatID
+	stale := &ResumeState{
+		DestPath:      dest,
+		VideoID:       "v1",
+		FormatID:      "OLD_FMT",
+		FileSize:      int64(len(content)),
+		ContentLength: 0,
+		Completed:     []ByteRange{{Index: 0, StartByte: 0, EndByte: 4}},
+	}
+	require.NoError(t, stale.Save())
+
+	// Download with a different FormatID — should discard stale state
+	sd := NewSegmentDownloader(http.DefaultClient)
+	sd.ChunkSize = 5
+	sd.MaxChunkSize = 5
+	sd.Workers = 1
+	sd.Identity = &DownloadIdentity{VideoID: "v1", FormatID: "NEW_FMT"}
+	err := sd.DownloadToFile(context.Background(), srv.URL, dest)
+	require.NoError(t, err)
+
+	got, err := os.ReadFile(dest)
+	require.NoError(t, err)
+	assert.Equal(t, content, got)
+
+	// Verify the sidecar was rewritten with the new FormatID
+	rs, err := LoadResumeState(dest)
+	require.NoError(t, err)
+	assert.Nil(t, rs) // removed on success
+}
+
+func TestSegmentDownloaderPeriodicSave(t *testing.T) {
+	content := []byte("abcdefghijklmnopqrstuvwxyz")
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			var start, end int
+			fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end)
+			callCount++
+			// Fail on the third segment to simulate interruption
+			if callCount >= 3 {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			if start >= len(content) {
+				w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			if end >= len(content) {
+				end = len(content) - 1
+			}
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(content)))
+			w.WriteHeader(http.StatusPartialContent)
+			w.Write(content[start : end+1])
+			return
+		}
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		w.WriteHeader(http.StatusOK)
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	tmpDir := t.TempDir()
+	dest := filepath.Join(tmpDir, "test2.bin")
+
+	sd := NewSegmentDownloader(http.DefaultClient)
+	sd.ChunkSize = 5
+	sd.MaxChunkSize = 5
+	sd.Workers = 1
+	sd.Identity = &DownloadIdentity{VideoID: "v2", FormatID: "f2"}
+	_ = sd.DownloadToFile(context.Background(), srv.URL, dest)
+
+	// The sidecar should exist and have recorded the first 2 completed segments
+	rs, err := LoadResumeState(dest)
+	require.NoError(t, err)
+	require.NotNil(t, rs)
+	assert.Len(t, rs.Completed, 2)
+}
+
+func TestDownloadToFilePartNaming(t *testing.T) {
+	content := []byte("Hello, this is test content for downloader!")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		w.WriteHeader(http.StatusOK)
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	tmpDir := t.TempDir()
+	partPath := filepath.Join(tmpDir, "test.txt.part")
+
+	d := New()
+	d.Identity = &DownloadIdentity{VideoID: "v1", FormatID: "f1"}
+	err := d.DownloadToFile(context.Background(), srv.URL, partPath)
+	require.NoError(t, err)
+
+	// The downloader itself does not rename; that is the engine's job.
+	// Here we verify the .part file exists and the sidecar is cleaned up.
+	require.FileExists(t, partPath)
+	require.NoFileExists(t, resumePath(partPath))
+
+	got, err := os.ReadFile(partPath)
+	require.NoError(t, err)
+	assert.Equal(t, content, got)
+}

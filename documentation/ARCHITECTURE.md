@@ -189,8 +189,11 @@ err := d.DownloadToFile(ctx, url, "/path/to/video.mp4")
 
 - **Bounded chunks:** All requests use `Range: bytes=N-M` with a maximum chunk size of ~10 MB. YouTube's CDN throttles unbounded ranges (`bytes=0-`) to ~32 KB/s on some videos.
 - **Segmented downloads:** Files are split into chunks. With `Workers > 1`, chunks are downloaded concurrently via `errgroup.Group`. With `Workers == 1`, chunks are downloaded sequentially.
-- **Resume support:** A sidecar JSON file tracks completed segments. Interrupted downloads resume from the last missing chunk.
-- **Direct I/O:** `SegmentDownloader` uses `WriteAt` to write chunks directly to the correct file offset without temporary files.
+- **Resume support:** A sidecar JSON file (`{dest}.segments`) tracks completed segments. Interrupted downloads resume from the last missing chunk.
+- **Identity-scoped resume:** `ResumeState` keys on `(VideoID, FormatID, ContentLength)`, not URL. Changing `--format` between runs automatically discards stale state. YouTube URL expiry is handled by re-extraction on 403.
+- **Periodic save:** The sidecar is flushed to disk after every completed segment, so a crash loses at most one segment's worth of work.
+- **`.part` temp files:** Downloads write to `filename.part` and are atomically renamed to the final name on success. Incomplete downloads never look like complete files.
+- **Direct I/O:** `SegmentDownloader` uses `WriteAt` to write chunks directly to the correct file offset without temporary fragment files.
 - **Chunk planning:** `PlanSegments(totalSize, maxWorkers, minChunkSize, maxChunkSize)` balances concurrency against chunk size, never exceeding the 10 MB bound.
 
 **Why bounded chunks?** YouTube's CDN applies different throttling rules based on Range request size. Unbounded or very large (> ~15 MB) ranges are throttled to ~32 KB/s. Bounded chunks ≤ 10 MB stream at full bandwidth. This behavior is video-dependent — some videos allow unbounded ranges, others do not. The bounded-chunk strategy is the safe, universal approach.

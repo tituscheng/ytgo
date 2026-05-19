@@ -18,12 +18,14 @@ import (
 // the destination using WriteAt (pwrite on POSIX) so no temporary fragments are
 // needed.
 type SegmentDownloader struct {
-	Client      *http.Client
-	Workers     int   // max concurrent segment fetchers
-	ChunkSize   int64 // minimum segment size (default 5 MB)
+	Client       *http.Client
+	Workers      int   // max concurrent segment fetchers
+	ChunkSize    int64 // minimum segment size (default 5 MB)
 	MaxChunkSize int64 // maximum segment size (default ~10 MB)
-	Progress    ProgressFunc
-	BufferPool  *sync.Pool
+	Progress     ProgressFunc
+	BufferPool   *sync.Pool
+	Identity     *DownloadIdentity // nil = no resume validation
+	Continue     bool              // default true; mirrors --no-continue
 }
 
 // NewSegmentDownloader creates a SegmentDownloader with sensible defaults.
@@ -51,13 +53,56 @@ func (sd *SegmentDownloader) DownloadToFile(ctx context.Context, url, destPath s
 		return sd.fallback(ctx, url, destPath)
 	}
 
+	// Handle --no-continue: wipe any partial state and start fresh
+	if !sd.Continue {
+		_ = os.Remove(destPath)
+		_ = os.Remove(resumePath(destPath))
+	}
+
 	// Load or create resume state
 	rs, err := LoadResumeState(destPath)
 	if err != nil {
 		return fmt.Errorf("load resume state: %w", err)
 	}
+
+	// Build expected identity for this download
+	expectedCL := int64(0)
+	if sd.Identity != nil {
+		expectedCL = sd.Identity.ContentLength
+	}
+	if expectedCL == 0 {
+		expectedCL = ParseContentLengthFromURL(url)
+	}
+
 	if rs == nil {
-		rs = &ResumeState{URL: url, DestPath: destPath, FileSize: totalSize}
+		rs = &ResumeState{
+			URL:           url,
+			DestPath:      destPath,
+			FileSize:      totalSize,
+			ContentLength: expectedCL,
+		}
+		if sd.Identity != nil {
+			rs.VideoID = sd.Identity.VideoID
+			rs.FormatID = sd.Identity.FormatID
+		}
+	} else if sd.Identity != nil {
+		id := *sd.Identity
+		id.ContentLength = expectedCL
+		if !rs.Validate(id, url, totalSize) {
+			// Stale state (wrong format, video, or size). Discard and start fresh.
+			rs = &ResumeState{
+				URL:           url,
+				DestPath:      destPath,
+				FileSize:      totalSize,
+				VideoID:       sd.Identity.VideoID,
+				FormatID:      sd.Identity.FormatID,
+				ContentLength: expectedCL,
+			}
+		} else {
+			// Valid state: update ephemeral URL in case it was refreshed
+			rs.URL = url
+			rs.FileSize = totalSize
+		}
 	}
 
 	// Determine missing work
@@ -91,6 +136,7 @@ func (sd *SegmentDownloader) DownloadToFile(ctx context.Context, url, destPath s
 				return fmt.Errorf("segment download failed: %w", err)
 			}
 			rs.Completed = append(rs.Completed, seg)
+			_ = rs.Save() // periodic save
 		}
 	} else {
 		// Bounded concurrency via semaphore
@@ -108,6 +154,7 @@ func (sd *SegmentDownloader) DownloadToFile(ctx context.Context, url, destPath s
 				}
 				completedMu.Lock()
 				rs.Completed = append(rs.Completed, seg)
+				_ = rs.Save() // periodic save
 				completedMu.Unlock()
 				return nil
 			})

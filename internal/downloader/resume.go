@@ -3,15 +3,67 @@ package downloader
 import (
 	"encoding/json"
 	"os"
+	"strconv"
 )
 
 // ResumeState tracks which byte ranges have been successfully downloaded
 // for a segmented download. It is persisted as a JSON sidecar file.
 type ResumeState struct {
-	URL       string      `json:"url"`
-	DestPath  string      `json:"dest_path"`
-	FileSize  int64       `json:"file_size"`
-	Completed []ByteRange `json:"completed"`
+	URL           string      `json:"url"`            // current URL (ephemeral)
+	DestPath      string      `json:"dest_path"`
+	FileSize      int64       `json:"file_size"`
+	VideoID       string      `json:"video_id"`       // durable identity
+	FormatID      string      `json:"format_id"`
+	ContentLength int64       `json:"content_length"` // from clen= query param
+	Completed     []ByteRange `json:"completed"`
+}
+
+// DownloadIdentity scopes resume state to a specific video + format.
+type DownloadIdentity struct {
+	VideoID       string
+	FormatID      string
+	ContentLength int64 // expected from clen=; 0 means unknown
+}
+
+// Validate checks whether the stored resume state matches the requested identity.
+// A mismatch means the state is stale (e.g. user changed --format between runs).
+// ContentLength is only checked when both stored and expected values are non-zero.
+func (rs *ResumeState) Validate(id DownloadIdentity, url string, fileSize int64) bool {
+	if rs.VideoID != "" && rs.VideoID != id.VideoID {
+		return false
+	}
+	if rs.FormatID != "" && rs.FormatID != id.FormatID {
+		return false
+	}
+	if rs.ContentLength > 0 && id.ContentLength > 0 && rs.ContentLength != id.ContentLength {
+		return false
+	}
+	// FileSize mismatch is a strong signal of stale state
+	if rs.FileSize > 0 && fileSize > 0 && rs.FileSize != fileSize {
+		return false
+	}
+	return true
+}
+
+// ParseContentLengthFromURL extracts the clen= value from a googlevideo.com URL.
+func ParseContentLengthFromURL(rawURL string) int64 {
+	// Simple scan for clen= followed by digits
+	const prefix = "clen="
+	for i := 0; i < len(rawURL); i++ {
+		if i+len(prefix) <= len(rawURL) && rawURL[i:i+len(prefix)] == prefix {
+			start := i + len(prefix)
+			end := start
+			for end < len(rawURL) && rawURL[end] >= '0' && rawURL[end] <= '9' {
+				end++
+			}
+			if end > start {
+				if n, err := strconv.ParseInt(rawURL[start:end], 10, 64); err == nil {
+					return n
+				}
+			}
+		}
+	}
+	return 0
 }
 
 // resumePath returns the sidecar file path for a given destination.

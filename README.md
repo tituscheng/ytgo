@@ -32,7 +32,7 @@ If you need sponsorblock, 1000+ site extractors, or `--cookies-from-browser`, yt
 - **Format preferences** — type-safe codec/container scoring (`PreferVideoCodec: "avc1"`) instead of regex DSL
 - **HTTP download** with bounded chunk segmentation (~10 MB), concurrent workers, resume support, and progress spinners
 - **Post-processing** via FFmpeg: merge, audio extraction, metadata/thumbnail/chapter embedding
-- **Subtitles**: download manual & auto-generated captions, convert JSON3 → SRT/VTT
+- **Subtitles**: download manual & auto-generated captions (SRT/VTT). Production-grade fetch with retries + jittered backoff, server `Retry-After` honored, atomic writes (`.tmp` → rename), forced JSON3 source format, region-code fallback (e.g. `en` → `en-US`), and per-language failures surfaced via the structured error log.
 - **Output templates**: `%(title)s`, `%(upload_date>%Y-%m-%d)s`, `%(playlist_index)s`, etc.
 - **Resume support** — identity-scoped segment-level resume, `.part` temp files, automatic re-extraction on expired URLs
 - **Download archive** to skip already-downloaded videos
@@ -335,7 +335,7 @@ sub-langs:
 | `internal/pipeline` | Concurrent worker pool for extract/postprocess |
 | `internal/format` | Format selection DSL parser |
 | `internal/postprocessor` | FFmpeg-based merge/embed/convert |
-| `internal/subtitle` | Subtitle fetch & JSON3→SRT/VTT conversion |
+| `internal/subtitle` | Subtitle fetch (retry/backoff, atomic writes) & JSON3→SRT/VTT conversion |
 | `internal/template` | Output filename template engine |
 | `internal/archive` | Download archive file I/O |
 | `pkg/ytgo/api` | Public library API |

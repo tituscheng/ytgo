@@ -241,7 +241,7 @@ All post-processors accept the path to the `ffmpeg` binary via `config.FFmpegLoc
 | `internal/cleanup` | Temp file tracker with guaranteed cleanup on defer |
 | `internal/archive` | Plain-text ID archive (one video ID per line) |
 | `internal/template` | Output filename template engine: `%(title)s`, `%(id)s`, `%(upload_date>%Y-%m-%d)s`, etc. |
-| `internal/subtitle` | Fetch subtitle tracks, convert JSON3 → SRT/VTT |
+| `internal/subtitle` | Fetch subtitle tracks (tuned HTTP client, retry with exponential backoff + `Retry-After`, atomic `.tmp`→rename writes, JSON3-forcing query rewrite, manual-vs-auto track scoring, region-code fallback), convert JSON3 → SRT/VTT. Per-language failures bubble up via the engine's `OnError` (`Stage: "subtitle"`). |
 | `pkg/ytgo` | Shared domain types: `VideoInfo`, `Format`, `Subtitle`, `Thumbnail`, `Chapter` |
 
 ---

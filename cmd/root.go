@@ -155,6 +155,15 @@ func run(cmd *cobra.Command, args []string) error {
 		cfg.ContinuePartial = false
 	}
 
+	// Validate subtitle format at the CLI boundary so we fail fast with a
+	// clear message instead of partway through a download.
+	switch cfg.SubFormat {
+	case "", "srt", "vtt":
+		// ok
+	default:
+		return fmt.Errorf("invalid --sub-format %q (allowed: srt, vtt)", cfg.SubFormat)
+	}
+
 	if cfg.Verbose {
 		fmt.Fprintf(os.Stderr, "Options: %+v\n", cfg)
 	}

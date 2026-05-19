@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/briandowns/spinner"
 	"github.com/fatih/color"
@@ -778,7 +779,27 @@ func (e *Engine) writeSubtitles(ctx context.Context, info *extractor.VideoInfo) 
 	}
 	baseName := template.Parse(e.Config.OutputTemplate, info, "")
 	baseName = strings.TrimSuffix(baseName, filepath.Ext(baseName))
-	_, err := subtitle.WriteSubs(ctx, info, langs, e.Config.SubFormat, e.Config.Paths, baseName, e.Config.WriteAutoSubs)
+
+	client := &http.Client{Transport: e.Transport, Timeout: 30 * time.Second}
+	_, err := subtitle.WriteSubs(ctx, info, subtitle.WriteOptions{
+		Langs:     langs,
+		Format:    e.Config.SubFormat,
+		BasePath:  e.Config.Paths,
+		BaseName:  baseName,
+		WriteAuto: e.Config.WriteAutoSubs,
+		Client:    client,
+		Logger:    e.Config.Logger,
+		OnError: func(lang string, ferr error, retryable bool) {
+			e.reportFailure(ytgo.DownloadFailure{
+				VideoID:   info.ID,
+				Title:     info.Title,
+				URL:       info.WebpageURL,
+				Stage:     "subtitle",
+				Error:     fmt.Sprintf("%s: %s", lang, ferr.Error()),
+				Retryable: retryable,
+			})
+		},
+	})
 	return err
 }
 

@@ -55,8 +55,9 @@ func (c *Client) PlayerWithEnrichment(ctx context.Context, videoID string) (*Pla
 		return nil, err
 	}
 
-	// If we already have likes, skip the secondary call
-	if resp.VideoDetails.LikeCount != "" {
+	// If we already have a non-zero like count, skip the secondary call.
+	// ANDROID_VR sometimes returns "0" as a placeholder — verify with WEB.
+	if resp.VideoDetails.LikeCount != "" && resp.VideoDetails.LikeCount != "0" {
 		return resp, nil
 	}
 

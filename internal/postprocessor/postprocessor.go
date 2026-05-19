@@ -41,6 +41,15 @@ func runFFmpeg(ctx context.Context, ffmpeg string, args ...string) error {
 	return cmd.Run()
 }
 
+// isMP4Family reports whether the extension is an MP4/M4A/MOV container.
+func isMP4Family(ext string) bool {
+	switch strings.ToLower(strings.TrimPrefix(ext, ".")) {
+	case "mp4", "m4a", "m4v", "mov":
+		return true
+	}
+	return false
+}
+
 // Merger merges separate audio and video files.
 type Merger struct {
 	ffmpeg string
@@ -75,6 +84,9 @@ func (m *Merger) Run(ctx context.Context, inputs []string, outputPath, forceExt 
 	for i := range inputs {
 		args = append(args, "-map", fmt.Sprintf("%d:a?", i))
 		args = append(args, "-map", fmt.Sprintf("%d:v?", i))
+	}
+	if isMP4Family(ext) || isMP4Family(forceExt) {
+		args = append(args, "-movflags", "+faststart")
 	}
 	args = append(args, outputPath)
 
@@ -143,6 +155,9 @@ func (c *Converter) ExtractAudio(ctx context.Context, input, audioFormat, qualit
 	}
 
 	args = append(args, "-vn", output)
+	if isMP4Family(ext) {
+		args = append(args, "-movflags", "+faststart")
+	}
 	if err := runFFmpeg(ctx, c.ffmpeg, args...); err != nil {
 		return "", fmt.Errorf("ffmpeg convert: %w", err)
 	}
@@ -207,6 +222,9 @@ func (e *Embedder) Run(ctx context.Context, path string, info *extractor.VideoIn
 	}
 
 	args = append(args, "-c", "copy")
+	if isMP4Family(filepath.Ext(path)) {
+		args = append(args, "-movflags", "+faststart")
+	}
 
 	// Need a temp output
 	tmpPath := path + ".tmp"

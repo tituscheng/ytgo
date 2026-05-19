@@ -38,6 +38,39 @@ type Engine struct {
 	bufPool    *sync.Pool
 }
 
+// progressAggregate sums per-format download progress into a single callback.
+type progressAggregate struct {
+	mu       sync.Mutex
+	byFormat map[string]int64
+	totals   map[string]int64
+	callback func(downloaded, total int64)
+}
+
+func newProgressAggregate(cb func(downloaded, total int64)) *progressAggregate {
+	return &progressAggregate{
+		byFormat: make(map[string]int64),
+		totals:   make(map[string]int64),
+		callback: cb,
+	}
+}
+
+func (pa *progressAggregate) report(formatID string, down, tot int64) {
+	pa.mu.Lock()
+	pa.byFormat[formatID] = down
+	pa.totals[formatID] = tot
+	var sumDown, sumTot int64
+	for _, v := range pa.byFormat {
+		sumDown += v
+	}
+	for _, v := range pa.totals {
+		sumTot += v
+	}
+	pa.mu.Unlock()
+	if pa.callback != nil {
+		pa.callback(sumDown, sumTot)
+	}
+}
+
 // NewEngine builds an Engine with default YouTube support.
 func NewEngine(cfg config.DownloadOptions) *Engine {
 	tp := transport.NewTunedTransport()
@@ -141,7 +174,14 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 	}
 
 	// Format selection
-	selected, err := format.Select(e.Config.Format, info.Formats)
+	selected, err := format.SelectWithOptions(e.Config.Format, info.Formats, format.SelectOptions{
+		Preferences: format.Preferences{
+			PreferVideoCodec: e.Config.PreferVideoCodec,
+			PreferAudioCodec: e.Config.PreferAudioCodec,
+			PreferContainer:  e.Config.PreferContainer,
+		},
+		FormatFilter: e.Config.FormatFilter,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("format selection failed: %w", err)
 	}
@@ -181,6 +221,14 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 	}
 
 	downloaded := make([]string, len(selected))
+
+	// Set up progress aggregation when the caller provides a callback and
+	// there are multiple formats to download.
+	var pa *progressAggregate
+	if e.Config.OnProgress != nil && len(selected) > 1 {
+		pa = newProgressAggregate(e.Config.OnProgress)
+	}
+
 	if len(selected) == 1 {
 		partPath := outputPath + ".part"
 		finalPath := outputPath
@@ -188,7 +236,7 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 			partPath = filepath.Join(os.TempDir(), filepath.Base(finalPath)) + ".part"
 			finalPath = filepath.Join(os.TempDir(), filepath.Base(finalPath))
 		}
-		if err := e.downloadFormatToFile(ctx, info, selected[0], partPath, 1, 1); err != nil {
+		if err := e.downloadFormatToFile(ctx, info, selected[0], partPath, 1, 1, pa); err != nil {
 			return nil, fmt.Errorf("download format %s failed: %w", selected[0].FormatID, err)
 		}
 		if !isStdout {
@@ -212,7 +260,7 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 					partPath = filepath.Join(os.TempDir(), filepath.Base(finalPath)) + ".part"
 					finalPath = filepath.Join(os.TempDir(), filepath.Base(finalPath))
 				}
-				if err := e.downloadFormatToFile(ctx, info, f, partPath, i+1, len(selected)); err != nil {
+				if err := e.downloadFormatToFile(ctx, info, f, partPath, i+1, len(selected), pa); err != nil {
 					return fmt.Errorf("download format %s failed: %w", f.FormatID, err)
 				}
 				if !isStdout {
@@ -431,7 +479,7 @@ func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) err
 	return postprocErr
 }
 
-func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.VideoInfo, f extractor.Format, dest string, current, total int) error {
+func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.VideoInfo, f extractor.Format, dest string, current, total int, pa *progressAggregate) error {
 	// For concurrent downloads (total > 1), skip the interactive spinner to
 	// avoid stderr interleaving. Instead, log start and completion.
 	concurrent := total > 1
@@ -450,6 +498,22 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.Video
 
 	clen := downloader.ParseContentLengthFromURL(f.URL)
 
+	// Build the progress callback: user callback + spinner + aggregation
+	progressCb := func(down, tot int64) {
+		if e.Config.OnProgress != nil && pa == nil {
+			// Single-format download: report directly
+			e.Config.OnProgress(down, tot)
+		}
+		if pa != nil {
+			// Multi-format download: aggregate before reporting
+			pa.report(f.FormatID, down, tot)
+		}
+		if s != nil && tot > 0 {
+			pct := float64(down) / float64(tot) * 100
+			s.Suffix = fmt.Sprintf("  Downloading format %s (%.1f%%)", f.FormatID, pct)
+		}
+	}
+
 	// Use a local Downloader instance to avoid race on the Progress callback
 	d := &downloader.Downloader{
 		Client:     e.Downloader.Client,
@@ -461,12 +525,7 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.Video
 			ContentLength: clen,
 		},
 		Continue: e.Config.ContinuePartial,
-		Progress: func(down, tot int64) {
-			if s != nil && tot > 0 {
-				pct := float64(down) / float64(tot) * 100
-				s.Suffix = fmt.Sprintf("  Downloading format %s (%.1f%%)", f.FormatID, pct)
-			}
-		},
+		Progress: progressCb,
 	}
 
 	err := d.DownloadToFile(ctx, f.URL, dest)

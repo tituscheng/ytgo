@@ -52,6 +52,9 @@ func init() {
 	// Format selection
 	rootCmd.Flags().StringP("format", "f", cfg.Format, "Video format code or selector")
 	rootCmd.Flags().BoolP("list-formats", "F", false, "List available formats")
+	rootCmd.Flags().String("prefer-vcodec", "", "Prefer formats with this video codec prefix (e.g. avc1)")
+	rootCmd.Flags().String("prefer-acodec", "", "Prefer formats with this audio codec prefix (e.g. mp4a)")
+	rootCmd.Flags().String("prefer-ext", "", "Prefer formats with this container extension (e.g. mp4)")
 
 	// Output
 	rootCmd.Flags().StringP("output", "o", cfg.OutputTemplate, "Output filename template")
@@ -115,6 +118,9 @@ func init() {
 
 	// Post-processing
 	rootCmd.Flags().String("ffmpeg-location", cfg.FFmpegLocation, "Path to ffmpeg binary")
+
+	// Metadata enrichment
+	rootCmd.Flags().Bool("enrich-metadata", false, "Fetch additional metadata (likes) — slower")
 
 	// Verbosity
 	rootCmd.Flags().BoolP("quiet", "q", false, "Quiet mode")
@@ -187,11 +193,15 @@ func run(cmd *cobra.Command, args []string) error {
 	cfg.MaxPostProcessors, _ = cmd.Flags().GetInt("max-postprocessors")
 	cfg.LimitRate, _ = cmd.Flags().GetInt64("limit-rate")
 	cfg.FFmpegLocation, _ = cmd.Flags().GetString("ffmpeg-location")
+	cfg.PreferVideoCodec, _ = cmd.Flags().GetString("prefer-vcodec")
+	cfg.PreferAudioCodec, _ = cmd.Flags().GetString("prefer-acodec")
+	cfg.PreferContainer, _ = cmd.Flags().GetString("prefer-ext")
 	cfg.Quiet, _ = cmd.Flags().GetBool("quiet")
 	cfg.NoWarnings, _ = cmd.Flags().GetBool("no-warnings")
 	cfg.Verbose, _ = cmd.Flags().GetBool("verbose")
 	cfg.PrintJSON, _ = cmd.Flags().GetBool("print-json")
 	cfg.NoProgress, _ = cmd.Flags().GetBool("no-progress")
+	cfg.EnrichMetadata, _ = cmd.Flags().GetBool("enrich-metadata")
 
 	if cfg.Verbose {
 		fmt.Fprintf(os.Stderr, "Options: %+v\n", cfg)
@@ -202,7 +212,9 @@ func run(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	engine := core.NewEngine(cfg)
-	engine.Register(youtube.NewExtractor(cfg.SocketTimeout))
+	ext := youtube.NewExtractor(cfg.SocketTimeout)
+	ext.Enrich = cfg.EnrichMetadata
+	engine.Register(ext)
 
 	return engine.Run(ctx, args[0])
 }

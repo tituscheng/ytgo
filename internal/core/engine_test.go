@@ -142,6 +142,96 @@ func TestBuildOutputPath(t *testing.T) {
 	assert.Equal(t, "2024-01-15 - My Video.mp4", path)
 }
 
+func TestEngineRun_DownloadWithProgress(t *testing.T) {
+	content := []byte("fake video content")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	tmpDir := t.TempDir()
+	info := &ytgo.VideoInfo{
+		ID:    "test123",
+		Title: "My Video",
+		Formats: []ytgo.Format{
+			{FormatID: "1", URL: srv.URL, Ext: "mp4", HasVideo: true, HasAudio: true, Filesize: int64(len(content))},
+		},
+	}
+
+	var progressCalled bool
+	var finalDown, finalTot int64
+	cfg := config.DownloadOptions{
+		OutputTemplate: "%(title)s [%(id)s].%(ext)s",
+		Paths:          tmpDir,
+		NoProgress:     true,
+		OnProgress: func(down, tot int64) {
+			progressCalled = true
+			finalDown = down
+			finalTot = tot
+		},
+	}
+	eng := NewEngine(cfg)
+	eng.Register(&mockExtractor{info: info})
+
+	err := eng.Run(context.Background(), "http://example.com")
+	require.NoError(t, err)
+
+	assert.True(t, progressCalled, "OnProgress should have been called")
+	assert.Equal(t, int64(len(content)), finalDown, "downloaded bytes should match content size")
+	assert.Equal(t, int64(len(content)), finalTot, "total bytes should match content size")
+}
+
+func TestEngineRun_EnrichMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+	info := &ytgo.VideoInfo{
+		ID:          "test123",
+		Title:       "My Video",
+		LikeCount:   42000,
+		Description: "A great video",
+		Formats: []ytgo.Format{
+			{FormatID: "1", URL: "http://example.com/video.mp4", Ext: "mp4", HasVideo: true, HasAudio: true},
+		},
+	}
+	cfg := config.DownloadOptions{
+		SkipDownload:   true,
+		WriteInfoJSON:  true,
+		OutputTemplate: "%(title)s [%(id)s].%(ext)s",
+		Paths:          tmpDir,
+	}
+	eng := NewEngine(cfg)
+	eng.Register(&mockExtractor{info: info})
+
+	err := eng.Run(context.Background(), "http://example.com")
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(tmpDir, "My Video [test123].info.json"))
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "\"like_count\": 42000")
+}
+
+func TestProgressAggregate(t *testing.T) {
+	var calls []struct{ down, tot int64 }
+	pa := newProgressAggregate(func(down, tot int64) {
+		calls = append(calls, struct{ down, tot int64 }{down, tot})
+	})
+
+	pa.report("v1", 100, 1000)
+	require.Len(t, calls, 1)
+	assert.Equal(t, int64(100), calls[0].down)
+	assert.Equal(t, int64(1000), calls[0].tot)
+
+	pa.report("a1", 200, 500)
+	require.Len(t, calls, 2)
+	assert.Equal(t, int64(300), calls[1].down)
+	assert.Equal(t, int64(1500), calls[1].tot)
+
+	// Update an existing format
+	pa.report("v1", 500, 1000)
+	require.Len(t, calls, 3)
+	assert.Equal(t, int64(700), calls[2].down)
+	assert.Equal(t, int64(1500), calls[2].tot)
+}
+
 func TestHumanSize(t *testing.T) {
 	assert.Equal(t, "unknown", humanSize(0))
 	assert.Equal(t, "500 B", humanSize(500))

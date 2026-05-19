@@ -82,6 +82,9 @@ type VideoInfo struct {
 	Entries []*VideoInfo `json:"entries,omitempty"`
 }
 
+// FormatFilter is a user-provided predicate for filtering formats.
+type FormatFilter func(Format) bool
+
 // IsPlaylist returns true if the info represents a playlist.
 func (v *VideoInfo) IsPlaylist() bool {
 	return len(v.Entries) > 0

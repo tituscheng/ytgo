@@ -225,6 +225,57 @@ func TestPlaylist_SingleColumn(t *testing.T) {
 	assert.Equal(t, 4*time.Minute, pl.Entries[1].Duration)
 }
 
+func TestPlayerWithEnrichment_NoLikesThenWEB(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var req PlayerRequest
+		json.NewDecoder(r.Body).Decode(&req)
+
+		if req.Context.Client.ClientName == "ANDROID_VR" {
+			resp := buildPlayerResponse("OK", "")
+			body, _ := json.Marshal(resp)
+			w.Write(body)
+			return
+		}
+
+		// WEB client returns likes
+		resp := buildPlayerResponse("OK", "")
+		resp["videoDetails"].(map[string]any)["likeCount"] = "42000"
+		body, _ := json.Marshal(resp)
+		w.Write(body)
+	}))
+	defer server.Close()
+
+	client := NewClient(10 * time.Second)
+	client.HTTPClient.Transport = &testTransport{server: server}
+
+	resp, err := client.PlayerWithEnrichment(context.Background(), "dQw4w9WgXcQ")
+	require.NoError(t, err)
+	assert.Equal(t, 2, callCount)
+	assert.Equal(t, "42000", resp.VideoDetails.LikeCount)
+}
+
+func TestPlayerWithEnrichment_AlreadyHasLikes(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		resp := buildPlayerResponse("OK", "")
+		resp["videoDetails"].(map[string]any)["likeCount"] = "15000"
+		body, _ := json.Marshal(resp)
+		w.Write(body)
+	}))
+	defer server.Close()
+
+	client := NewClient(10 * time.Second)
+	client.HTTPClient.Transport = &testTransport{server: server}
+
+	resp, err := client.PlayerWithEnrichment(context.Background(), "dQw4w9WgXcQ")
+	require.NoError(t, err)
+	assert.Equal(t, 1, callCount)
+	assert.Equal(t, "15000", resp.VideoDetails.LikeCount)
+}
+
 func TestPlaylist_WithContinuation(t *testing.T) {
 	callCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

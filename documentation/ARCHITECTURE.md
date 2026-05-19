@@ -171,6 +171,11 @@ Parses yt-dlp-style format selectors:
 - Resolution filters: `best[height<=720]`
 - Merge syntax: `bv*+ba/best` (best video + best audio, fallback to best combined)
 
+**Preference scoring** (`SelectWithOptions`):
+- `PreferVideoCodec`, `PreferAudioCodec`, `PreferContainer` add +5000 to the heuristic score
+- This outranks non-matching formats without excluding them
+- A `FormatFilter func(Format) bool` pre-filter can hard-exclude formats
+
 Returns a slice of `extractor.Format` to download. The engine downloads each format in the slice, then merges if there are multiple.
 
 ---
@@ -186,6 +191,8 @@ d := downloader.New()
 d.Progress = func(down, total int64) { /* update spinner */ }
 err := d.DownloadToFile(ctx, url, "/path/to/video.mp4")
 ```
+
+**Progress aggregation:** When the caller sets `config.OnProgress` and multiple formats are selected (`bv+ba`), the engine aggregates per-format progress into a single callback via `progressAggregate`.
 
 - **Bounded chunks:** All requests use `Range: bytes=N-M` with a maximum chunk size of ~10 MB. YouTube's CDN throttles unbounded ranges (`bytes=0-`) to ~32 KB/s on some videos.
 - **Segmented downloads:** Files are split into chunks. With `Workers > 1`, chunks are downloaded concurrently via `errgroup.Group`. With `Workers == 1`, chunks are downloaded sequentially.
@@ -210,6 +217,8 @@ FFmpeg-based post-processing:
 - **`Converter`** — extracts audio (`-x --audio-format mp3`).
 - **`Embedder`** — embeds metadata, thumbnail, subtitles, chapters into the output file.
 - **`DownloadThumbnail`** — fetches the best thumbnail URL and saves it.
+
+**Auto-faststart:** MP4/M4A/MOV outputs automatically receive `-movflags +faststart` for web streaming compatibility. No flag required.
 
 All post-processors accept the path to the `ffmpeg` binary via `config.FFmpegLocation`.
 

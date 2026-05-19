@@ -56,6 +56,22 @@ func androidVRContext(visitorID string) RequestContext {
 	}
 }
 
+// webContext returns the WEB client context for enrichment calls.
+func webContext(visitorID string) RequestContext {
+	return RequestContext{
+		Client: ClientInfo{
+			HL:            "en",
+			GL:            "US",
+			ClientName:    "WEB",
+			ClientVersion: "2.20250101",
+			UserAgent:     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+			TimeZone:      "UTC",
+			UTCOffset:     0,
+			VisitorData:   visitorID,
+		},
+	}
+}
+
 // embeddedPlayerContext returns the WEB_EMBEDDED_PLAYER fallback context.
 func embeddedPlayerContext(visitorID string) RequestContext {
 	return RequestContext{

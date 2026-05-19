@@ -124,6 +124,7 @@ type VideoDetails struct {
 	ChannelID        string   `json:"channelId"`
 	ShortDescription string   `json:"shortDescription"`
 	ViewCount        string   `json:"viewCount"`
+	LikeCount        string   `json:"likeCount,omitempty"`
 	Author           string   `json:"author"`
 	IsPrivate        bool     `json:"isPrivate"`
 	IsLiveContent    bool     `json:"isLiveContent"`

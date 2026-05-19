@@ -4,6 +4,21 @@ This document captures the next major features and improvements for ytgo. Each i
 
 ---
 
+## ✅ Recently Implemented
+
+| Feature | Status | PR |
+|---|---|---|
+| Format preference scoring (`PreferVideoCodec`, `PreferAudioCodec`, `PreferContainer`) | ✅ Done | — |
+| Go-native `FormatFilter` func | ✅ Done | — |
+| Auto-faststart for MP4/M4A outputs | ✅ Done | — |
+| Structured `OnProgress` callback with multi-format aggregation | ✅ Done | — |
+| `api.GetStreamURL()` with rich metadata | ✅ Done | — |
+| Opt-in metadata enrichment (`--enrich-metadata`) for likes | ✅ Done | — |
+
+---
+
+---
+
 ## 1. Fix `--cookies-from-browser` for Age-Restricted Content
 
 ### Problem

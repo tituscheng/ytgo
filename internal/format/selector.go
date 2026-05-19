@@ -10,6 +10,19 @@ import (
 	"ytgo/internal/extractor"
 )
 
+// Preferences boosts scores for formats matching specific criteria.
+type Preferences struct {
+	PreferVideoCodec string
+	PreferAudioCodec string
+	PreferContainer  string
+}
+
+// SelectOptions controls advanced format selection behaviour.
+type SelectOptions struct {
+	Preferences  Preferences
+	FormatFilter func(extractor.Format) bool
+}
+
 // Select evaluates the format selector string against the available formats
 // and returns the chosen formats. It supports:
 //   - Special names: best, worst, bestvideo/bv, worstvideo/wv, bestaudio/ba, worstaudio/wa
@@ -18,8 +31,25 @@ import (
 //   - Combinations: bv+ba
 //   - Fallbacks: bv*+ba/best
 func Select(selector string, formats []extractor.Format) ([]extractor.Format, error) {
+	return SelectWithOptions(selector, formats, SelectOptions{})
+}
+
+// SelectWithOptions evaluates the format selector with preference scoring and
+// an optional pre-filter.
+func SelectWithOptions(selector string, formats []extractor.Format, opts SelectOptions) ([]extractor.Format, error) {
 	if len(formats) == 0 {
 		return nil, fmt.Errorf("no formats available")
+	}
+
+	// Apply user-provided pre-filter
+	if opts.FormatFilter != nil {
+		var filtered []extractor.Format
+		for _, f := range formats {
+			if opts.FormatFilter(f) {
+				filtered = append(filtered, f)
+			}
+		}
+		formats = filtered
 	}
 
 	selector = strings.TrimSpace(selector)
@@ -30,7 +60,7 @@ func Select(selector string, formats []extractor.Format) ([]extractor.Format, er
 	// Handle fallbacks: "expr1/expr2/expr3"
 	parts := splitFallbacks(selector)
 	for _, part := range parts {
-		result, err := selectSingle(part, formats)
+		result, err := selectSingle(part, formats, opts.Preferences)
 		if err == nil && len(result) > 0 {
 			return result, nil
 		}
@@ -68,12 +98,12 @@ func splitFallbacks(s string) []string {
 	return parts
 }
 
-func selectSingle(selector string, formats []extractor.Format) ([]extractor.Format, error) {
+func selectSingle(selector string, formats []extractor.Format, prefs Preferences) ([]extractor.Format, error) {
 	selector = strings.TrimSpace(selector)
 
 	// Handle combinations: "bv+ba"
 	if strings.Contains(selector, "+") {
-		return selectCombination(selector, formats)
+		return selectCombination(selector, formats, prefs)
 	}
 
 	// Handle filters: "best[height<=720]"
@@ -81,48 +111,48 @@ func selectSingle(selector string, formats []extractor.Format) ([]extractor.Form
 		if end := strings.LastIndex(selector, "]"); end > idx {
 			base := strings.TrimSpace(selector[:idx])
 			filter := selector[idx+1 : end]
-			return selectWithFilter(base, filter, formats)
+			return selectWithFilter(base, filter, formats, prefs)
 		}
 	}
 
 	// Plain selector
-	return selectPlain(selector, formats)
+	return selectPlain(selector, formats, prefs)
 }
 
-func selectPlain(selector string, formats []extractor.Format) ([]extractor.Format, error) {
+func selectPlain(selector string, formats []extractor.Format, prefs Preferences) ([]extractor.Format, error) {
 	switch strings.ToLower(selector) {
 	case "best", "b":
-		f := best(formats, nil)
+		f := best(formats, nil, prefs)
 		if f == nil {
 			return nil, fmt.Errorf("no best format")
 		}
 		return []extractor.Format{*f}, nil
 	case "worst":
-		f := worst(formats, nil)
+		f := worst(formats, nil, prefs)
 		if f == nil {
 			return nil, fmt.Errorf("no worst format")
 		}
 		return []extractor.Format{*f}, nil
 	case "bestvideo", "bv":
-		f := bestVideo(formats, nil)
+		f := bestVideo(formats, nil, prefs)
 		if f == nil {
 			return nil, fmt.Errorf("no best video format")
 		}
 		return []extractor.Format{*f}, nil
 	case "worstvideo", "wv":
-		f := worstVideo(formats, nil)
+		f := worstVideo(formats, nil, prefs)
 		if f == nil {
 			return nil, fmt.Errorf("no worst video format")
 		}
 		return []extractor.Format{*f}, nil
 	case "bestaudio", "ba":
-		f := bestAudio(formats, nil)
+		f := bestAudio(formats, nil, prefs)
 		if f == nil {
 			return nil, fmt.Errorf("no best audio format")
 		}
 		return []extractor.Format{*f}, nil
 	case "worstaudio", "wa":
-		f := worstAudio(formats, nil)
+		f := worstAudio(formats, nil, prefs)
 		if f == nil {
 			return nil, fmt.Errorf("no worst audio format")
 		}
@@ -144,7 +174,7 @@ func selectPlain(selector string, formats []extractor.Format) ([]extractor.Forma
 		}
 	}
 	if len(matches) > 0 {
-		f := best(matches, nil)
+		f := best(matches, nil, prefs)
 		if f != nil {
 			return []extractor.Format{*f}, nil
 		}
@@ -153,15 +183,15 @@ func selectPlain(selector string, formats []extractor.Format) ([]extractor.Forma
 	return nil, fmt.Errorf("unknown selector: %s", selector)
 }
 
-func selectWithFilter(base, filter string, formats []extractor.Format) ([]extractor.Format, error) {
+func selectWithFilter(base, filter string, formats []extractor.Format, prefs Preferences) ([]extractor.Format, error) {
 	pred, err := parseFilter(filter)
 	if err != nil {
 		return nil, err
 	}
-	return selectPlain(base, filterFormats(formats, pred))
+	return selectPlain(base, filterFormats(formats, pred), prefs)
 }
 
-func selectCombination(selector string, formats []extractor.Format) ([]extractor.Format, error) {
+func selectCombination(selector string, formats []extractor.Format, prefs Preferences) ([]extractor.Format, error) {
 	parts := strings.Split(selector, "+")
 	var result []extractor.Format
 	used := make(map[string]bool)
@@ -169,7 +199,7 @@ func selectCombination(selector string, formats []extractor.Format) ([]extractor
 		part = strings.TrimSpace(part)
 		// Remove trailing * (fallback marker)
 		part = strings.TrimSuffix(part, "*")
-		selected, err := selectSingle(part, formats)
+		selected, err := selectSingle(part, formats, prefs)
 		if err != nil {
 			return nil, err
 		}
@@ -197,35 +227,35 @@ func filterFormats(formats []extractor.Format, pred predicate) []extractor.Forma
 	return out
 }
 
-func best(formats []extractor.Format, pred predicate) *extractor.Format {
+func best(formats []extractor.Format, pred predicate, prefs Preferences) *extractor.Format {
 	var best *extractor.Format
 	for i := range formats {
 		f := &formats[i]
 		if pred != nil && !pred(*f) {
 			continue
 		}
-		if best == nil || score(f) > score(best) {
+		if best == nil || score(f, prefs) > score(best, prefs) {
 			best = f
 		}
 	}
 	return best
 }
 
-func worst(formats []extractor.Format, pred predicate) *extractor.Format {
+func worst(formats []extractor.Format, pred predicate, prefs Preferences) *extractor.Format {
 	var worst *extractor.Format
 	for i := range formats {
 		f := &formats[i]
 		if pred != nil && !pred(*f) {
 			continue
 		}
-		if worst == nil || score(f) < score(worst) {
+		if worst == nil || score(f, prefs) < score(worst, prefs) {
 			worst = f
 		}
 	}
 	return worst
 }
 
-func bestVideo(formats []extractor.Format, pred predicate) *extractor.Format {
+func bestVideo(formats []extractor.Format, pred predicate, prefs Preferences) *extractor.Format {
 	// Prefer video-only, but accept combined if no video-only exists
 	var videoOnly []extractor.Format
 	var combined []extractor.Format
@@ -243,22 +273,22 @@ func bestVideo(formats []extractor.Format, pred predicate) *extractor.Format {
 		}
 	}
 	if len(videoOnly) > 0 {
-		return best(videoOnly, nil)
+		return best(videoOnly, nil, prefs)
 	}
-	return best(combined, nil)
+	return best(combined, nil, prefs)
 }
 
-func worstVideo(formats []extractor.Format, pred predicate) *extractor.Format {
+func worstVideo(formats []extractor.Format, pred predicate, prefs Preferences) *extractor.Format {
 	var out []extractor.Format
 	for _, f := range formats {
 		if f.HasVideo {
 			out = append(out, f)
 		}
 	}
-	return worst(out, pred)
+	return worst(out, pred, prefs)
 }
 
-func bestAudio(formats []extractor.Format, pred predicate) *extractor.Format {
+func bestAudio(formats []extractor.Format, pred predicate, prefs Preferences) *extractor.Format {
 	// Prefer audio-only, but accept combined if no audio-only exists
 	var audioOnly []extractor.Format
 	var combined []extractor.Format
@@ -276,23 +306,23 @@ func bestAudio(formats []extractor.Format, pred predicate) *extractor.Format {
 		}
 	}
 	if len(audioOnly) > 0 {
-		return best(audioOnly, nil)
+		return best(audioOnly, nil, prefs)
 	}
-	return best(combined, nil)
+	return best(combined, nil, prefs)
 }
 
-func worstAudio(formats []extractor.Format, pred predicate) *extractor.Format {
+func worstAudio(formats []extractor.Format, pred predicate, prefs Preferences) *extractor.Format {
 	var out []extractor.Format
 	for _, f := range formats {
 		if f.HasAudio {
 			out = append(out, f)
 		}
 	}
-	return worst(out, pred)
+	return worst(out, pred, prefs)
 }
 
 // score returns a heuristic quality score. Higher is better.
-func score(f *extractor.Format) float64 {
+func score(f *extractor.Format, prefs Preferences) float64 {
 	var s float64
 	if f.HasVideo {
 		s += float64(f.Height) * 10
@@ -306,6 +336,19 @@ func score(f *extractor.Format) float64 {
 	if f.Filesize > 0 {
 		s += float64(f.Filesize) / 1e6
 	}
+
+	// Preference bonuses — large enough to outrank non-matching formats
+	const bonus = 5000
+	if prefs.PreferVideoCodec != "" && strings.HasPrefix(f.VideoCodec, prefs.PreferVideoCodec) {
+		s += bonus
+	}
+	if prefs.PreferAudioCodec != "" && strings.HasPrefix(f.AudioCodec, prefs.PreferAudioCodec) {
+		s += bonus
+	}
+	if prefs.PreferContainer != "" && f.Ext == prefs.PreferContainer {
+		s += bonus
+	}
+
 	return s
 }
 

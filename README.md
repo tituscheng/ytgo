@@ -29,6 +29,7 @@ If you need sponsorblock, 1000+ site extractors, or `--cookies-from-browser`, yt
 
 - **YouTube video & playlist extraction** via a custom Innertube client (no JS engine)
 - **Format selection** with yt-dlp-style selectors (`bv*+ba/best`, `best[height<=720]`, itag, extension)
+- **Format preferences** — type-safe codec/container scoring (`PreferVideoCodec: "avc1"`) instead of regex DSL
 - **HTTP download** with bounded chunk segmentation (~10 MB), concurrent workers, resume support, and progress spinners
 - **Post-processing** via FFmpeg: merge, audio extraction, metadata/thumbnail/chapter embedding
 - **Subtitles**: download manual & auto-generated captions, convert JSON3 → SRT/VTT
@@ -75,6 +76,12 @@ go build -o ytgo .
 # Best video + audio, merge to MP4
 ./ytgo -f "bv*+ba/best" --merge-output-format mp4 "URL"
 
+# Prefer H.264 + AAC in MP4 (type-safe — no regex DSL needed)
+./ytgo --prefer-vcodec avc1 --prefer-acodec mp4a --prefer-ext mp4 "URL"
+
+# Fetch likes alongside metadata (slower — secondary API call)
+./ytgo --enrich-metadata --write-info-json --skip-download "URL"
+
 # Download playlist with archive & subtitles
 ./ytgo --download-archive archive.txt \
        --write-subs --embed-subs --sub-langs en \
@@ -92,6 +99,75 @@ go build -o ytgo .
 # Pipe subtitle to stdout
 ./ytgo --skip-download --write-auto-subs --sub-langs en --sub-format vtt -o - "URL"
 ```
+
+---
+
+## Format Preferences
+
+ytgo replaces yt-dlp's regex-based format filters (`vcodec~='^avc1'`) with **type-safe preference scoring**:
+
+```bash
+# CLI
+./ytgo --prefer-vcodec avc1 --prefer-acodec mp4a --prefer-ext mp4 "URL"
+```
+
+```go
+// Library
+opts := api.DefaultOptions()
+opts.Format = "bv+ba/best"
+opts.PreferVideoCodec = "avc1"
+opts.PreferAudioCodec = "mp4a"
+opts.PreferContainer = "mp4"
+```
+
+Matching formats get a large score bonus (+5000) that outranks non-matching formats, so `best` naturally picks H.264/AAC/MP4 without any string DSL.
+
+For edge cases, you can also provide a Go filter function:
+
+```go
+opts.FormatFilter = func(f ytgo.Format) bool {
+    return f.Ext == "mp4" && f.Height >= 720
+}
+```
+
+---
+
+## Progress Callback
+
+Instead of parsing yt-dlp's `[download] X.X%` stdout lines, ytgo exposes a structured callback:
+
+```go
+opts := api.DefaultOptions()
+opts.OnProgress = func(downloaded, total int64) {
+    pct := float64(downloaded) / float64(total) * 100
+    fmt.Printf("Downloaded: %.1f%%\n", pct)
+}
+err := api.Download(ctx, url, opts)
+```
+
+For multi-format downloads (`bv+ba`), progress is **automatically aggregated** across all formats — you get a single callback showing total video progress.
+
+---
+
+## Get Stream URL
+
+Resolve a temporary direct stream URL without downloading:
+
+```go
+result, err := api.GetStreamURL(ctx, api.GetStreamURL{
+    URL:    "https://www.youtube.com/watch?v=...",
+    Format: "best[height<=1080]",
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+// result.URL       → direct playable URL
+// result.Format    → full format metadata (codec, resolution, etc.)
+// result.VideoInfo → full video metadata (title, thumbnail, etc.)
+```
+
+This is better than yt-dlp's `--get-url` raw string because you get structured format and video metadata alongside the URL.
 
 ---
 
@@ -185,6 +261,8 @@ output: "%(title)s [%(id)s].%(ext)s"
 audio-format: "mp3"
 embed-metadata: true
 embed-thumbnail: true
+prefer-vcodec: "avc1"
+prefer-ext: "mp4"
 sub-langs:
   - en
 ```
@@ -238,6 +316,7 @@ import (
     "context"
     "log"
 
+    "ytgo/pkg/ytgo"
     "ytgo/pkg/ytgo/api"
 )
 
@@ -253,6 +332,28 @@ func main() {
 }
 ```
 
+### With progress callback
+
+```go
+opts := api.DefaultOptions()
+opts.OnProgress = func(down, tot int64) {
+    // Emit to your UI framework (Wails, Fyne, etc.)
+}
+err := api.Download(ctx, url, opts)
+```
+
+### Stream URL for playback
+
+```go
+result, err := api.GetStreamURL(ctx, api.GetStreamOptions{
+    URL:    videoURL,
+    Format: "best[height<=1080]",
+})
+// result.URL → stream URL
+// result.Format.VideoCodec → "avc1.640028"
+// result.VideoInfo.Title → "Video Title"
+```
+
 ---
 
 ## Known Limitations
@@ -263,7 +364,7 @@ ytgo is YouTube-only and intentionally lean. Things yt-dlp does that ytgo does *
 - **Cookies from browser** — `--cookies-from-browser` is not implemented (cookie files work)
 - **Other sites** — only YouTube (the `InfoExtractor` interface is ready for more)
 - **Throttling bypass** — bounded chunk downloading handles most throttling; `ANDROID_VR` avoids signature-based throttling
-- **Full format selection DSL** — covers the common cases, not every yt-dlp edge case
+- **String regex filters** — ytgo uses type-safe preference scoring and Go filter functions instead
 
 See [`Future.md`](Future.md) for the roadmap.
 

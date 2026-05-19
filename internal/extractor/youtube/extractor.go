@@ -19,7 +19,8 @@ var (
 
 // Extractor implements extractor.InfoExtractor for YouTube.
 type Extractor struct {
-	client *innertube.Client
+	client  *innertube.Client
+	Enrich  bool // if true, makes secondary API calls for additional metadata
 }
 
 // NewExtractor creates a new YouTube extractor.
@@ -52,7 +53,13 @@ func (e *Extractor) Extract(ctx context.Context, rawURL string) (*extractor.Vide
 }
 
 func (e *Extractor) extractVideo(ctx context.Context, videoID, rawURL string) (*extractor.VideoInfo, error) {
-	resp, err := e.client.Player(ctx, videoID)
+	var resp *innertube.PlayerResponse
+	var err error
+	if e.Enrich {
+		resp, err = e.client.PlayerWithEnrichment(ctx, videoID)
+	} else {
+		resp, err = e.client.Player(ctx, videoID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("get video failed: %w", err)
 	}
@@ -70,6 +77,9 @@ func (e *Extractor) extractVideo(ctx context.Context, videoID, rawURL string) (*
 
 	if views, _ := strconv.ParseInt(resp.VideoDetails.ViewCount, 10, 64); views > 0 {
 		info.ViewCount = views
+	}
+	if likes, _ := strconv.ParseInt(resp.VideoDetails.LikeCount, 10, 64); likes > 0 {
+		info.LikeCount = likes
 	}
 	if sec, _ := strconv.Atoi(resp.VideoDetails.LengthSeconds); sec > 0 {
 		info.Duration = time.Duration(sec) * time.Second

@@ -3,12 +3,25 @@ package config
 
 import (
 	"time"
+
+	"ytgo/pkg/ytgo"
 )
 
 // DownloadOptions collects every flag that influences extraction / download / post-processing.
 type DownloadOptions struct {
 	// Format selection
 	Format string `mapstructure:"format"`
+
+	// FormatPreferences boosts scores for formats matching these preferences.
+	// They are NOT hard filters — formats that don't match are still considered,
+	// but matching formats get a large score bonus.
+	PreferVideoCodec string `mapstructure:"prefer-vcodec"`
+	PreferAudioCodec string `mapstructure:"prefer-acodec"`
+	PreferContainer  string `mapstructure:"prefer-ext"`
+
+	// FormatFilter is an optional pre-filter applied before scoring.
+	// Only formats passing this filter are considered.
+	FormatFilter ytgo.FormatFilter `mapstructure:"-"`
 
 	// Output
 	OutputTemplate string `mapstructure:"output"`
@@ -75,6 +88,12 @@ type DownloadOptions struct {
 
 	// Post-processing
 	FFmpegLocation string `mapstructure:"ffmpeg-location"`
+
+	// Metadata enrichment (slower — makes secondary API calls)
+	EnrichMetadata bool `mapstructure:"enrich-metadata"`
+
+	// Progress callback (library use only — not settable via CLI/config file)
+	OnProgress func(downloaded, total int64) `mapstructure:"-"`
 
 	// Verbosity
 	Quiet       bool `mapstructure:"quiet"`

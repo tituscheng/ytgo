@@ -181,3 +181,125 @@ fi
 	err := e.Run(context.Background(), input, info, EmbedOptions{Metadata: true})
 	require.NoError(t, err)
 }
+
+// mockFFmpeg returns a fake ffmpeg script path that records its arguments to
+// argsFile and then copies the first -i input to the output.
+func mockFFmpeg(t *testing.T, tmpDir string) (ffmpegPath, argsFile string) {
+	ffmpegPath = filepath.Join(tmpDir, "ffmpeg")
+	argsFile = filepath.Join(tmpDir, "ffmpeg.args")
+	script := "#!/bin/sh\n" +
+		"echo \"$@\" > \"" + argsFile + "\"\n" +
+		"input=\"\"\n" +
+		"output=\"\"\n" +
+		"next=0\n" +
+		"for arg in \"$@\"; do\n" +
+		"    if [ \"$arg\" = \"-i\" ]; then\n" +
+		"        next=1\n" +
+		"        continue\n" +
+		"    fi\n" +
+		"    if [ \"$next\" = \"1\" ]; then\n" +
+		"        input=\"$arg\"\n" +
+		"        next=0\n" +
+		"    fi\n" +
+		"    case \"$arg\" in\n" +
+		"        -*) ;;\n" +
+		"        *) output=\"$arg\" ;;\n" +
+		"    esac\n" +
+		"done\n" +
+		"if [ -n \"$input\" ] && [ -n \"$output\" ]; then\n" +
+		"    cp \"$input\" \"$output\"\n" +
+		"fi\n"
+	require.NoError(t, os.WriteFile(ffmpegPath, []byte(script), 0755))
+	return ffmpegPath, argsFile
+}
+
+func readArgs(t *testing.T, argsFile string) string {
+	data, err := os.ReadFile(argsFile)
+	require.NoError(t, err)
+	return string(data)
+}
+
+func TestMergerAutoFastStart_MP4(t *testing.T) {
+	tmpDir := t.TempDir()
+	ffmpeg, argsFile := mockFFmpeg(t, tmpDir)
+
+	input1 := filepath.Join(tmpDir, "video.mp4")
+	input2 := filepath.Join(tmpDir, "audio.m4a")
+	require.NoError(t, os.WriteFile(input1, []byte("video"), 0644))
+	require.NoError(t, os.WriteFile(input2, []byte("audio"), 0644))
+
+	m := NewMerger(ffmpeg)
+	output := filepath.Join(tmpDir, "merged.mp4")
+	_, err := m.Run(context.Background(), []string{input1, input2}, output, "")
+	require.NoError(t, err)
+
+	args := readArgs(t, argsFile)
+	assert.Contains(t, args, "-movflags")
+	assert.Contains(t, args, "+faststart")
+}
+
+func TestMergerAutoFastStart_WEBM(t *testing.T) {
+	tmpDir := t.TempDir()
+	ffmpeg, argsFile := mockFFmpeg(t, tmpDir)
+
+	input1 := filepath.Join(tmpDir, "video.webm")
+	input2 := filepath.Join(tmpDir, "audio.webm")
+	require.NoError(t, os.WriteFile(input1, []byte("video"), 0644))
+	require.NoError(t, os.WriteFile(input2, []byte("audio"), 0644))
+
+	m := NewMerger(ffmpeg)
+	output := filepath.Join(tmpDir, "merged.webm")
+	_, err := m.Run(context.Background(), []string{input1, input2}, output, "")
+	require.NoError(t, err)
+
+	args := readArgs(t, argsFile)
+	assert.NotContains(t, args, "-movflags")
+}
+
+func TestConverterAutoFastStart_M4A(t *testing.T) {
+	tmpDir := t.TempDir()
+	ffmpeg, argsFile := mockFFmpeg(t, tmpDir)
+
+	input := filepath.Join(tmpDir, "input.mp4")
+	require.NoError(t, os.WriteFile(input, []byte("video"), 0644))
+
+	c := NewConverter(ffmpeg)
+	_, err := c.ExtractAudio(context.Background(), input, "m4a", "5")
+	require.NoError(t, err)
+
+	args := readArgs(t, argsFile)
+	assert.Contains(t, args, "-movflags")
+	assert.Contains(t, args, "+faststart")
+}
+
+func TestConverterAutoFastStart_MP3(t *testing.T) {
+	tmpDir := t.TempDir()
+	ffmpeg, argsFile := mockFFmpeg(t, tmpDir)
+
+	input := filepath.Join(tmpDir, "input.mp4")
+	require.NoError(t, os.WriteFile(input, []byte("video"), 0644))
+
+	c := NewConverter(ffmpeg)
+	_, err := c.ExtractAudio(context.Background(), input, "mp3", "5")
+	require.NoError(t, err)
+
+	args := readArgs(t, argsFile)
+	assert.NotContains(t, args, "-movflags")
+}
+
+func TestEmbedderAutoFastStart_MP4(t *testing.T) {
+	tmpDir := t.TempDir()
+	ffmpeg, argsFile := mockFFmpeg(t, tmpDir)
+
+	input := filepath.Join(tmpDir, "input.mp4")
+	require.NoError(t, os.WriteFile(input, []byte("video"), 0644))
+
+	e := NewEmbedder(ffmpeg)
+	info := &extractor.VideoInfo{Title: "Test"}
+	err := e.Run(context.Background(), input, info, EmbedOptions{Metadata: true})
+	require.NoError(t, err)
+
+	args := readArgs(t, argsFile)
+	assert.Contains(t, args, "-movflags")
+	assert.Contains(t, args, "+faststart")
+}

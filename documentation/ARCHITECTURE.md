@@ -57,6 +57,10 @@ Both paths converge on `core.Engine.Run()`, which is the single entry point for 
 
 **Why a separate package?** `pkg/` is the conventional Go location for public library surface. Internal packages can still change; `pkg/ytgo/api` is the stability contract.
 
+**Callbacks:** The API exposes two lifecycle hooks on `DownloadOptions`:
+- `OnProgress` — aggregated download progress (bytes downloaded / total)
+- `OnError` — structured failure report for every video that fails (playlist-safe)
+
 ---
 
 ### 3. Engine Layer (`internal/core/`)

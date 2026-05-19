@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -238,4 +240,136 @@ func TestHumanSize(t *testing.T) {
 	assert.Equal(t, "1.0 KB", humanSize(1024))
 	assert.Equal(t, "1.0 MB", humanSize(1024*1024))
 	assert.Equal(t, "1.0 GB", humanSize(1024*1024*1024))
+}
+
+// --- OnError callback tests ---
+
+// mockFailingExtractor always returns an error.
+type mockFailingExtractor struct{ err error }
+
+func (m *mockFailingExtractor) Name() string             { return "mock-fail" }
+func (m *mockFailingExtractor) Suitable(url string) bool { return true }
+func (m *mockFailingExtractor) Extract(ctx context.Context, url string) (*ytgo.VideoInfo, error) {
+	return nil, m.err
+}
+
+func TestEngineRun_OnError_SingleVideo(t *testing.T) {
+	var failure ytgo.DownloadFailure
+	cfg := config.DownloadOptions{
+		OnError: func(f ytgo.DownloadFailure) {
+			failure = f
+		},
+	}
+	eng := NewEngine(cfg)
+	eng.Register(&mockFailingExtractor{err: assert.AnError})
+
+	err := eng.Run(context.Background(), "http://example.com")
+	require.Error(t, err)
+
+	assert.Equal(t, "http://example.com", failure.URL)
+	assert.Equal(t, "extract", failure.Stage)
+	assert.Equal(t, assert.AnError.Error(), failure.Error)
+	assert.False(t, failure.Retryable)
+}
+
+func TestEngineRun_OnError_Playlist(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	var failures []ytgo.DownloadFailure
+	cfg := config.DownloadOptions{
+		OutputTemplate: "%(title)s.%(ext)s",
+		Paths:          t.TempDir(),
+		NoProgress:     true,
+		NoWarnings:     true,
+		OnError: func(f ytgo.DownloadFailure) {
+			failures = append(failures, f)
+		},
+	}
+
+	info := &ytgo.VideoInfo{
+		ID:            "pl123",
+		Title:         "My Playlist",
+		PlaylistTitle: "My Playlist",
+		Entries: []*ytgo.VideoInfo{
+			{ID: "v1", Title: "Video 1", OriginalURL: "http://example.com/1", Formats: []ytgo.Format{
+				{FormatID: "1", URL: srv.URL, Ext: "mp4", HasVideo: true, HasAudio: true},
+			}},
+			{ID: "v2", Title: "Video 2", OriginalURL: "http://example.com/2", Formats: []ytgo.Format{
+				{FormatID: "1", URL: srv.URL, Ext: "mp4", HasVideo: true, HasAudio: true},
+			}},
+			{ID: "v3", Title: "Video 3", OriginalURL: "http://example.com/3", Formats: []ytgo.Format{
+				{FormatID: "1", URL: srv.URL, Ext: "mp4", HasVideo: true, HasAudio: true},
+			}},
+		},
+	}
+
+	eng := NewEngine(cfg)
+	eng.Register(&mockExtractor{info: info})
+
+	// Playlist should return nil even though all 3 videos failed
+	err := eng.Run(context.Background(), "http://example.com")
+	require.NoError(t, err)
+
+	require.Len(t, failures, 3)
+	byID := make(map[string]ytgo.DownloadFailure)
+	for _, f := range failures {
+		byID[f.VideoID] = f
+	}
+	for i := 1; i <= 3; i++ {
+		f, ok := byID[fmt.Sprintf("v%d", i)]
+		require.True(t, ok, "expected failure for v%d", i)
+		assert.Equal(t, "download", f.Stage)
+		assert.True(t, f.Retryable, "HTTP 503 should be retryable")
+	}
+}
+
+// --- Error classification tests ---
+
+func TestIsRetryable(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		retryable bool
+	}{
+		{"nil", nil, false},
+		{"HTTP 429", fmt.Errorf("HTTP 429"), true},
+		{"HTTP 503", fmt.Errorf("HTTP 503"), true},
+		{"HTTP 504", fmt.Errorf("HTTP 504"), true},
+		{"HTTP 404", fmt.Errorf("HTTP 404"), false},
+		{"HTTP 403", fmt.Errorf("HTTP 403"), false},
+		{"connection reset", fmt.Errorf("connection reset by peer"), true},
+		{"timeout", fmt.Errorf("request timeout"), true},
+		{"no such host", fmt.Errorf("no such host"), true},
+		{"private video", fmt.Errorf("video is private"), false},
+		{"generic", fmt.Errorf("something went wrong"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.retryable, isRetryable(tt.err))
+		})
+	}
+}
+
+// --- JSON serialization test ---
+
+func TestDownloadFailure_JSON(t *testing.T) {
+	f := ytgo.DownloadFailure{
+		VideoID:   "abc123",
+		Title:     "Test Video",
+		URL:       "http://example.com",
+		FormatID:  "22",
+		Stage:     "download",
+		Error:     "HTTP 503",
+		Retryable: true,
+	}
+	data, err := json.Marshal(f)
+	require.NoError(t, err)
+
+	assert.Contains(t, string(data), `"video_id":"abc123"`)
+	assert.Contains(t, string(data), `"stage":"download"`)
+	assert.Contains(t, string(data), `"retryable":true`)
 }

@@ -95,6 +95,14 @@ type DownloadOptions struct {
 	// Progress callback (library use only — not settable via CLI/config file)
 	OnProgress func(downloaded, total int64) `mapstructure:"-"`
 
+	// OnError is called for every video that fails during processing.
+	// Library/CLI code sets it directly; not configurable via config file.
+	OnError func(ytgo.DownloadFailure) `mapstructure:"-"`
+
+	// WriteErrorLog is a file path to write structured failure JSON.
+	// Set via --write-error-log CLI flag.
+	WriteErrorLog string `mapstructure:"write-error-log"`
+
 	// Verbosity
 	Quiet       bool `mapstructure:"quiet"`
 	NoWarnings  bool `mapstructure:"no-warnings"`

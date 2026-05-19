@@ -85,6 +85,17 @@ type VideoInfo struct {
 // FormatFilter is a user-provided predicate for filtering formats.
 type FormatFilter func(Format) bool
 
+// DownloadFailure captures structured context about a single failed video.
+type DownloadFailure struct {
+	VideoID   string `json:"video_id"`
+	Title     string `json:"title,omitempty"`
+	URL       string `json:"url,omitempty"`
+	FormatID  string `json:"format_id,omitempty"`
+	Stage     string `json:"stage"` // "extract", "select", "download", "merge", "convert", "embed", "subtitle"
+	Error     string `json:"error"`
+	Retryable bool   `json:"retryable"`
+}
+
 // IsPlaylist returns true if the info represents a playlist.
 func (v *VideoInfo) IsPlaylist() bool {
 	return len(v.Entries) > 0

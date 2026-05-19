@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -14,6 +15,7 @@ import (
 	"ytgo/internal/config"
 	"ytgo/internal/core"
 	"ytgo/internal/extractor/youtube"
+	"ytgo/pkg/ytgo"
 )
 
 var rootCmd = &cobra.Command{
@@ -122,6 +124,9 @@ func init() {
 	// Metadata enrichment
 	rootCmd.Flags().Bool("enrich-metadata", false, "Fetch additional metadata (likes) — slower")
 
+	// Error reporting
+	rootCmd.Flags().String("write-error-log", "", "Write download failures to a JSON file")
+
 	// Verbosity
 	rootCmd.Flags().BoolP("quiet", "q", false, "Quiet mode")
 	rootCmd.Flags().Bool("no-warnings", false, "Suppress warnings")
@@ -202,6 +207,7 @@ func run(cmd *cobra.Command, args []string) error {
 	cfg.PrintJSON, _ = cmd.Flags().GetBool("print-json")
 	cfg.NoProgress, _ = cmd.Flags().GetBool("no-progress")
 	cfg.EnrichMetadata, _ = cmd.Flags().GetBool("enrich-metadata")
+	cfg.WriteErrorLog, _ = cmd.Flags().GetString("write-error-log")
 
 	if cfg.Verbose {
 		fmt.Fprintf(os.Stderr, "Options: %+v\n", cfg)
@@ -211,10 +217,27 @@ func run(cmd *cobra.Command, args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	// Accumulate failures for optional error log
+	var failures []ytgo.DownloadFailure
+	if cfg.WriteErrorLog != "" {
+		cfg.OnError = func(f ytgo.DownloadFailure) {
+			failures = append(failures, f)
+		}
+	}
+
 	engine := core.NewEngine(cfg)
 	ext := youtube.NewExtractor(cfg.SocketTimeout)
 	ext.Enrich = cfg.EnrichMetadata
 	engine.Register(ext)
 
-	return engine.Run(ctx, args[0])
+	runErr := engine.Run(ctx, args[0])
+
+	if cfg.WriteErrorLog != "" && len(failures) > 0 {
+		data, _ := json.MarshalIndent(failures, "", "  ")
+		if werr := os.WriteFile(cfg.WriteErrorLog, data, 0644); werr != nil && runErr == nil {
+			runErr = fmt.Errorf("write error log: %w", werr)
+		}
+	}
+
+	return runErr
 }

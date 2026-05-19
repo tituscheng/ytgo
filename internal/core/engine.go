@@ -27,6 +27,7 @@ import (
 	"ytgo/internal/subtitle"
 	"ytgo/internal/template"
 	"ytgo/internal/transport"
+	"ytgo/pkg/ytgo"
 )
 
 // Engine runs the full download pipeline.
@@ -114,6 +115,12 @@ func (e *Engine) Run(ctx context.Context, rawURL string) error {
 	// 2. Extract metadata
 	info, err := ext.Extract(ctx, rawURL)
 	if err != nil {
+		e.reportFailure(ytgo.DownloadFailure{
+			URL:       rawURL,
+			Stage:     "extract",
+			Error:     err.Error(),
+			Retryable: isRetryable(err),
+		})
 		return fmt.Errorf("extraction failed: %w", err)
 	}
 
@@ -183,6 +190,14 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 		FormatFilter: e.Config.FormatFilter,
 	})
 	if err != nil {
+		e.reportFailure(ytgo.DownloadFailure{
+			VideoID:   info.ID,
+			Title:     info.Title,
+			URL:       info.OriginalURL,
+			Stage:     "select",
+			Error:     err.Error(),
+			Retryable: false,
+		})
 		return nil, fmt.Errorf("format selection failed: %w", err)
 	}
 
@@ -215,6 +230,15 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 	if e.Config.ExtractAudio && len(selected) == 1 && selected[0].HasAudio && !isStdout {
 		sc := postprocessor.NewStreamConverter(e.Config.FFmpegLocation)
 		if err := sc.ExtractAudio(ctx, e.Downloader.Client, selected[0].URL, outputPath, e.Config.AudioFormat, e.Config.AudioQuality); err != nil {
+			e.reportFailure(ytgo.DownloadFailure{
+				VideoID:   info.ID,
+				Title:     info.Title,
+				URL:       info.OriginalURL,
+				FormatID:  selected[0].FormatID,
+				Stage:     "convert",
+				Error:     err.Error(),
+				Retryable: false,
+			})
 			return nil, fmt.Errorf("stream extract audio failed: %w", err)
 		}
 		return &videoTask{info: info, outputPath: outputPath, streamed: true}, nil
@@ -237,6 +261,15 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 			finalPath = filepath.Join(os.TempDir(), filepath.Base(finalPath))
 		}
 		if err := e.downloadFormatToFile(ctx, info, selected[0], partPath, 1, 1, pa); err != nil {
+			e.reportFailure(ytgo.DownloadFailure{
+				VideoID:   info.ID,
+				Title:     info.Title,
+				URL:       info.OriginalURL,
+				FormatID:  selected[0].FormatID,
+				Stage:     "download",
+				Error:     err.Error(),
+				Retryable: isRetryable(err),
+			})
 			return nil, fmt.Errorf("download format %s failed: %w", selected[0].FormatID, err)
 		}
 		if !isStdout {
@@ -261,6 +294,15 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 					finalPath = filepath.Join(os.TempDir(), filepath.Base(finalPath))
 				}
 				if err := e.downloadFormatToFile(ctx, info, f, partPath, i+1, len(selected), pa); err != nil {
+					e.reportFailure(ytgo.DownloadFailure{
+						VideoID:   info.ID,
+						Title:     info.Title,
+						URL:       info.OriginalURL,
+						FormatID:  f.FormatID,
+						Stage:     "download",
+						Error:     err.Error(),
+						Retryable: isRetryable(err),
+					})
 					return fmt.Errorf("download format %s failed: %w", f.FormatID, err)
 				}
 				if !isStdout {
@@ -292,6 +334,13 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 		merger := postprocessor.NewMerger(e.Config.FFmpegLocation)
 		merged, err := merger.Run(ctx, downloaded, outputPath, e.Config.MergeOutputFormat)
 		if err != nil {
+			e.reportFailure(ytgo.DownloadFailure{
+				VideoID:   info.ID,
+				Title:     info.Title,
+				Stage:     "merge",
+				Error:     err.Error(),
+				Retryable: false,
+			})
 			return fmt.Errorf("merge failed: %w", err)
 		}
 		finalPath = merged
@@ -306,6 +355,13 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 		conv := postprocessor.NewConverter(e.Config.FFmpegLocation)
 		converted, err := conv.ExtractAudio(ctx, finalPath, e.Config.AudioFormat, e.Config.AudioQuality)
 		if err != nil {
+			e.reportFailure(ytgo.DownloadFailure{
+				VideoID:   info.ID,
+				Title:     info.Title,
+				Stage:     "convert",
+				Error:     err.Error(),
+				Retryable: false,
+			})
 			return fmt.Errorf("audio extraction failed: %w", err)
 		}
 		if !e.Config.KeepVideo && finalPath != converted {
@@ -322,6 +378,13 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 			Subtitles: e.Config.EmbedSubs,
 			Chapters:  e.Config.EmbedChapters,
 		}); err != nil {
+			e.reportFailure(ytgo.DownloadFailure{
+				VideoID:   info.ID,
+				Title:     info.Title,
+				Stage:     "embed",
+				Error:     err.Error(),
+				Retryable: false,
+			})
 			return fmt.Errorf("embed failed: %w", err)
 		}
 	}
@@ -552,6 +615,31 @@ func isForbidden(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "403")
+}
+
+// isRetryable reports whether an error is likely transient.
+func isRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "429") || strings.Contains(msg, "503") || strings.Contains(msg, "504") {
+		return true
+	}
+	if strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "no such host") ||
+		strings.Contains(msg, "temporary") {
+		return true
+	}
+	return false
+}
+
+// reportFailure calls the user-configured OnError callback if set.
+func (e *Engine) reportFailure(f ytgo.DownloadFailure) {
+	if e.Config.OnError != nil {
+		e.Config.OnError(f)
+	}
 }
 
 // reextract fetches fresh metadata for a video using the registered extractors.

@@ -149,6 +149,29 @@ For multi-format downloads (`bv+ba`), progress is **automatically aggregated** a
 
 ---
 
+## Error Handling
+
+For single videos, `api.Download()` returns the error directly. For playlists, per-item failures are reported via the `OnError` callback so you can track which videos failed without stopping the entire batch:
+
+```go
+opts := api.DefaultOptions()
+var failures []ytgo.DownloadFailure
+opts.OnError = func(f ytgo.DownloadFailure) {
+    failures = append(failures, f)
+    log.Printf("Failed [%s] at stage %s: %s (retryable: %v)",
+        f.VideoID, f.Stage, f.Error, f.Retryable)
+}
+err := api.Download(ctx, playlistURL, opts)
+// failures contains every failed video with full context
+```
+
+**CLI:** Write failures to a JSON file for later review:
+```bash
+./ytgo --write-error-log errors.json PLAYLIST_URL
+```
+
+---
+
 ## Get Stream URL
 
 Resolve a temporary direct stream URL without downloading:

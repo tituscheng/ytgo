@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"ytgo/internal/limiter"
+	"github.com/tituscheng/ytgo/internal/limiter"
 )
 
 // defaultChunkSize is the maximum bytes requested per HTTP Range request.

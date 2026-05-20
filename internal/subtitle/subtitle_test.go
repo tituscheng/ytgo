@@ -13,8 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"ytgo/internal/extractor"
-	"ytgo/pkg/ytgo"
+	"github.com/tituscheng/ytgo/internal/extractor"
+	"github.com/tituscheng/ytgo/pkg/ytgo"
 )
 
 const validJSON3 = `{"events":[{"tStartMs":0,"dDurationMs":2000,"segs":[{"utf8":"Hello world"}]}]}`

@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"ytgo/internal/extractor"
+	"github.com/tituscheng/ytgo/internal/extractor"
 )
 
 // DownloadThumbnail downloads the best available thumbnail to the given path

@@ -1,4 +1,4 @@
-module ytgo
+module github.com/tituscheng/ytgo
 
 go 1.26.3
 

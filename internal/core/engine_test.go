@@ -14,9 +14,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"ytgo/internal/config"
-	"ytgo/internal/downloader"
-	"ytgo/pkg/ytgo"
+	"github.com/tituscheng/ytgo/internal/config"
+	"github.com/tituscheng/ytgo/internal/downloader"
+	"github.com/tituscheng/ytgo/pkg/ytgo"
 )
 
 // mockExtractor is a test extractor that returns canned data.

@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"ytgo/internal/extractor/youtube/innertube"
+	"github.com/tituscheng/ytgo/internal/extractor/youtube/innertube"
 )
 
 func TestSuitable(t *testing.T) {

@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"ytgo/internal/extractor"
+	"github.com/tituscheng/ytgo/internal/extractor"
 )
 
 // PostProcessor is implemented by every post-processor stage.

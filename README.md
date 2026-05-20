@@ -252,7 +252,7 @@ import (
     "context"
     "log"
 
-    "ytgo/pkg/ytgo/api"
+    "github.com/tituscheng/ytgo/pkg/ytgo/api"
 )
 
 func main() {
@@ -355,8 +355,8 @@ import (
     "context"
     "log"
 
-    "ytgo/pkg/ytgo"
-    "ytgo/pkg/ytgo/api"
+    "github.com/tituscheng/ytgo/pkg/ytgo"
+    "github.com/tituscheng/ytgo/pkg/ytgo/api"
 )
 
 func main() {

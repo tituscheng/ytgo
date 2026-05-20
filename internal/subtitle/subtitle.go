@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
-	"ytgo/internal/extractor"
-	"ytgo/internal/transport"
-	"ytgo/pkg/ytgo"
+	"github.com/tituscheng/ytgo/internal/extractor"
+	"github.com/tituscheng/ytgo/internal/transport"
+	"github.com/tituscheng/ytgo/pkg/ytgo"
 )
 
 const (

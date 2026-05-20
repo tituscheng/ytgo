@@ -12,7 +12,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"ytgo/internal/limiter"
+	"github.com/tituscheng/ytgo/internal/limiter"
 )
 
 // SegmentDownloader downloads a single file using multiple concurrent HTTP Range

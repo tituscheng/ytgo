@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"ytgo/pkg/ytgo"
+	"github.com/tituscheng/ytgo/pkg/ytgo"
 )
 
 var templateRe = regexp.MustCompile(`%\(([^)]+)\)s`)

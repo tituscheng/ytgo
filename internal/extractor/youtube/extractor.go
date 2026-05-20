@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"ytgo/internal/extractor"
-	"ytgo/internal/extractor/youtube/innertube"
-	"ytgo/internal/transport"
+	"github.com/tituscheng/ytgo/internal/extractor"
+	"github.com/tituscheng/ytgo/internal/extractor/youtube/innertube"
+	"github.com/tituscheng/ytgo/internal/transport"
 )
 
 var (

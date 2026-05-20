@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"ytgo/pkg/ytgo"
+	"github.com/tituscheng/ytgo/pkg/ytgo"
 )
 
 func TestDefaultOptions(t *testing.T) {

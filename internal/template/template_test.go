@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"ytgo/pkg/ytgo"
+	"github.com/tituscheng/ytgo/pkg/ytgo"
 )
 
 func TestParseBasic(t *testing.T) {

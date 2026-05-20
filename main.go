@@ -1,6 +1,6 @@
 package main
 
-import "ytgo/cmd"
+import "github.com/tituscheng/ytgo/cmd"
 
 func main() {
 	cmd.Execute()

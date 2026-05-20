@@ -12,10 +12,10 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"ytgo/internal/config"
-	"ytgo/internal/core"
-	"ytgo/internal/extractor/youtube"
-	"ytgo/pkg/ytgo"
+	"github.com/tituscheng/ytgo/internal/config"
+	"github.com/tituscheng/ytgo/internal/core"
+	"github.com/tituscheng/ytgo/internal/extractor/youtube"
+	"github.com/tituscheng/ytgo/pkg/ytgo"
 )
 
 var rootCmd = &cobra.Command{

@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"ytgo/internal/extractor"
+	"github.com/tituscheng/ytgo/internal/extractor"
 )
 
 // Preferences boosts scores for formats matching specific criteria.

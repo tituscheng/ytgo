@@ -4,7 +4,7 @@ package extractor
 import (
 	"context"
 
-	"ytgo/pkg/ytgo"
+	"github.com/tituscheng/ytgo/pkg/ytgo"
 )
 
 // InfoExtractor is implemented by every site-specific extractor.

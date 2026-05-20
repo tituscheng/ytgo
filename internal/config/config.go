@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	"ytgo/pkg/ytgo"
+	"github.com/tituscheng/ytgo/pkg/ytgo"
 )
 
 // DownloadOptions collects every flag that influences extraction / download / post-processing.

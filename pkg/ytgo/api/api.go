@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"time"
 
-	"ytgo/internal/config"
-	"ytgo/internal/core"
-	"ytgo/internal/extractor/youtube"
-	"ytgo/internal/format"
-	"ytgo/pkg/ytgo"
+	"github.com/tituscheng/ytgo/internal/config"
+	"github.com/tituscheng/ytgo/internal/core"
+	"github.com/tituscheng/ytgo/internal/extractor/youtube"
+	"github.com/tituscheng/ytgo/internal/format"
+	"github.com/tituscheng/ytgo/pkg/ytgo"
 )
 
 // DownloadOptions is the public-facing configuration struct.

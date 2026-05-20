@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"ytgo/internal/extractor"
+	"github.com/tituscheng/ytgo/internal/extractor"
 )
 
 func TestFindFFmpeg(t *testing.T) {

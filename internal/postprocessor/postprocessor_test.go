@@ -43,6 +43,16 @@ func TestMergerSingleInput(t *testing.T) {
 	assert.Equal(t, "only.mp4", out)
 }
 
+func TestFFmpegBaseArgsQuiet(t *testing.T) {
+	quiet := ffmpegBaseArgs(true)
+	assert.Contains(t, quiet, "-nostats")
+	assert.Contains(t, quiet, "error")
+
+	verbose := ffmpegBaseArgs(false)
+	assert.Contains(t, verbose, "-stats")
+	assert.Contains(t, verbose, "warning")
+}
+
 func TestConverterNoFFmpeg(t *testing.T) {
 	t.Setenv("PATH", "")
 	c := NewConverter("/nonexistent/ffmpeg")
@@ -217,6 +227,27 @@ func readArgs(t *testing.T, argsFile string) string {
 	data, err := os.ReadFile(argsFile)
 	require.NoError(t, err)
 	return string(data)
+}
+
+func TestMergerQuietUsesNoStats(t *testing.T) {
+	tmpDir := t.TempDir()
+	ffmpeg, argsFile := mockFFmpeg(t, tmpDir)
+
+	input1 := filepath.Join(tmpDir, "video.mp4")
+	input2 := filepath.Join(tmpDir, "audio.m4a")
+	require.NoError(t, os.WriteFile(input1, []byte("video"), 0644))
+	require.NoError(t, os.WriteFile(input2, []byte("audio"), 0644))
+
+	m := NewMerger(ffmpeg)
+	m.Quiet = true
+	output := filepath.Join(tmpDir, "merged.mp4")
+	_, err := m.Run(context.Background(), []string{input1, input2}, output, "")
+	require.NoError(t, err)
+
+	args := readArgs(t, argsFile)
+	assert.Contains(t, args, "-nostats")
+	assert.Contains(t, args, "error")
+	assert.NotContains(t, args, "-stats")
 }
 
 func TestMergerAutoFastStart_MP4(t *testing.T) {

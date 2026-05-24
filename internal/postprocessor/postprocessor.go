@@ -36,38 +36,51 @@ func findFFmpeg(preferred string) string {
 }
 
 // runFFmpeg executes an ffmpeg command.
-// When prefix is non-empty (used in concurrent post-processing with MaxPostProcessors > 1),
-// stderr/stdout are captured and emitted with the prefix to prevent interleaving (Issue 5).
-// When prefix == "", the classic live-to-stderr behavior is preserved for single-video downloads.
-func runFFmpeg(ctx context.Context, ffmpeg string, prefix string, args ...string) error {
+// When quiet is true, or prefix is non-empty (concurrent post-processing), output is
+// captured instead of streaming to the terminal. Prefixed output is emitted only when
+// quiet is false. On failure, stderr is included in the returned error.
+func runFFmpeg(ctx context.Context, ffmpeg string, prefix string, quiet bool, args ...string) error {
 	cmd := exec.CommandContext(ctx, ffmpeg, args...)
 
-	if prefix == "" {
+	if prefix == "" && !quiet {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		return cmd.Run()
 	}
 
-	// Capture output so multiple concurrent ffmpeg invocations don't interleave on the terminal.
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
 
 	err := cmd.Run()
 
-	writePrefixed := func(buf *bytes.Buffer) {
-		if buf.Len() == 0 {
-			return
+	if prefix != "" && !quiet {
+		writePrefixed := func(buf *bytes.Buffer) {
+			if buf.Len() == 0 {
+				return
+			}
+			for _, line := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+				fmt.Fprintf(os.Stderr, "%s%s\n", prefix, line)
+			}
 		}
-		for _, line := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
-			fmt.Fprintf(os.Stderr, "%s%s\n", prefix, line)
-		}
+		writePrefixed(&stdoutBuf)
+		writePrefixed(&stderrBuf)
 	}
 
-	writePrefixed(&stdoutBuf)
-	writePrefixed(&stderrBuf)
-
+	if err != nil {
+		msg := strings.TrimSpace(stderrBuf.String())
+		if msg != "" {
+			return fmt.Errorf("%w: %s", err, msg)
+		}
+	}
 	return err
+}
+
+func ffmpegBaseArgs(quiet bool) []string {
+	if quiet {
+		return []string{"-y", "-loglevel", "error", "-nostats"}
+	}
+	return []string{"-y", "-loglevel", "warning", "-stats"}
 }
 
 // isMP4Family reports whether the extension is an MP4/M4A/MOV container.
@@ -83,6 +96,7 @@ func isMP4Family(ext string) bool {
 type Merger struct {
 	ffmpeg string
 	prefix string // non-empty only when concurrent post-processing is enabled (prevents interleaving)
+	Quiet  bool    // suppress ffmpeg progress output (library / --quiet mode)
 }
 
 // NewMerger creates a Merger (no output prefix).
@@ -111,7 +125,7 @@ func (m *Merger) Run(ctx context.Context, inputs []string, outputPath, forceExt 
 		outputPath = strings.TrimSuffix(outputPath, filepath.Ext(outputPath)) + ext
 	}
 
-	args := []string{"-y", "-loglevel", "warning", "-stats"}
+	args := ffmpegBaseArgs(m.Quiet)
 	for _, in := range inputs {
 		args = append(args, "-i", in)
 	}
@@ -126,7 +140,7 @@ func (m *Merger) Run(ctx context.Context, inputs []string, outputPath, forceExt 
 	}
 	args = append(args, outputPath)
 
-	if err := runFFmpeg(ctx, m.ffmpeg, m.prefix, args...); err != nil {
+	if err := runFFmpeg(ctx, m.ffmpeg, m.prefix, m.Quiet, args...); err != nil {
 		return "", fmt.Errorf("ffmpeg merge: %w", err)
 	}
 	return outputPath, nil
@@ -136,6 +150,7 @@ func (m *Merger) Run(ctx context.Context, inputs []string, outputPath, forceExt 
 type Converter struct {
 	ffmpeg string
 	prefix string
+	Quiet  bool
 }
 
 // NewConverter creates a Converter (no output prefix).
@@ -173,7 +188,7 @@ func (c *Converter) ExtractAudio(ctx context.Context, input, audioFormat, qualit
 	}
 
 	output := strings.TrimSuffix(input, filepath.Ext(input)) + ext
-	args := []string{"-y", "-loglevel", "warning", "-i", input}
+	args := append(ffmpegBaseArgs(c.Quiet), "-i", input)
 
 	// Audio codec selection
 	switch audioFormat {
@@ -200,7 +215,7 @@ func (c *Converter) ExtractAudio(ctx context.Context, input, audioFormat, qualit
 	if isMP4Family(ext) {
 		args = append(args, "-movflags", "+faststart")
 	}
-	if err := runFFmpeg(ctx, c.ffmpeg, c.prefix, args...); err != nil {
+	if err := runFFmpeg(ctx, c.ffmpeg, c.prefix, c.Quiet, args...); err != nil {
 		return "", fmt.Errorf("ffmpeg convert: %w", err)
 	}
 	return output, nil
@@ -219,6 +234,7 @@ type Embedder struct {
 	ffmpeg string
 	client *http.Client // optional; if set, used for thumbnail downloads (shares tuned transport)
 	prefix string
+	Quiet  bool
 }
 
 // NewEmbedder creates an Embedder using a default short-lived HTTP client for thumbnails.
@@ -253,7 +269,7 @@ func (e *Embedder) Run(ctx context.Context, path string, info *extractor.VideoIn
 
 	// For mp4/m4a we can use atomicparsley or ffmpeg.
 	// ffmpeg -i input -c copy -metadata title="..." output
-	args := []string{"-y", "-loglevel", "warning", "-i", path}
+	args := append(ffmpegBaseArgs(e.Quiet), "-i", path)
 
 	if opts.Metadata {
 		if info.Title != "" {
@@ -293,7 +309,7 @@ func (e *Embedder) Run(ctx context.Context, path string, info *extractor.VideoIn
 	tmpPath := path + ".tmp"
 	args = append(args, tmpPath)
 
-	if err := runFFmpeg(ctx, e.ffmpeg, e.prefix, args...); err != nil {
+	if err := runFFmpeg(ctx, e.ffmpeg, e.prefix, e.Quiet, args...); err != nil {
 		removeFile(tmpPath)
 		return fmt.Errorf("ffmpeg embed: %w", err)
 	}

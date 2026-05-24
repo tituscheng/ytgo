@@ -870,29 +870,40 @@ func (e *Engine) cleanupFile(p string) {
 // makeMerger returns a Merger, using a prefixed version when concurrent
 // post-processing is enabled to prevent ffmpeg output interleaving.
 func (e *Engine) makeMerger(info *extractor.VideoInfo) *postprocessor.Merger {
+	var m *postprocessor.Merger
 	if e.Config.MaxPostProcessors > 1 {
-		return postprocessor.NewMergerWithPrefix(e.Config.FFmpegLocation, fmt.Sprintf("[%s] ", info.ID))
+		m = postprocessor.NewMergerWithPrefix(e.Config.FFmpegLocation, fmt.Sprintf("[%s] ", info.ID))
+	} else {
+		m = postprocessor.NewMerger(e.Config.FFmpegLocation)
 	}
-	return postprocessor.NewMerger(e.Config.FFmpegLocation)
+	m.Quiet = e.Config.Quiet
+	return m
 }
 
 // makeConverter is the equivalent for audio extraction.
 func (e *Engine) makeConverter(info *extractor.VideoInfo) *postprocessor.Converter {
+	var c *postprocessor.Converter
 	if e.Config.MaxPostProcessors > 1 {
-		return postprocessor.NewConverterWithPrefix(e.Config.FFmpegLocation, fmt.Sprintf("[%s] ", info.ID))
+		c = postprocessor.NewConverterWithPrefix(e.Config.FFmpegLocation, fmt.Sprintf("[%s] ", info.ID))
+	} else {
+		c = postprocessor.NewConverter(e.Config.FFmpegLocation)
 	}
-	return postprocessor.NewConverter(e.Config.FFmpegLocation)
+	c.Quiet = e.Config.Quiet
+	return c
 }
 
 // makeEmbedder is the equivalent for embed operations.
 func (e *Engine) makeEmbedder(info *extractor.VideoInfo, client *http.Client) *postprocessor.Embedder {
+	var emb *postprocessor.Embedder
 	if e.Config.MaxPostProcessors > 1 {
-		return postprocessor.NewEmbedderWithClientAndPrefix(e.Config.FFmpegLocation, client, fmt.Sprintf("[%s] ", info.ID))
+		emb = postprocessor.NewEmbedderWithClientAndPrefix(e.Config.FFmpegLocation, client, fmt.Sprintf("[%s] ", info.ID))
+	} else if client != nil {
+		emb = postprocessor.NewEmbedderWithClient(e.Config.FFmpegLocation, client)
+	} else {
+		emb = postprocessor.NewEmbedder(e.Config.FFmpegLocation)
 	}
-	if client != nil {
-		return postprocessor.NewEmbedderWithClient(e.Config.FFmpegLocation, client)
-	}
-	return postprocessor.NewEmbedder(e.Config.FFmpegLocation)
+	emb.Quiet = e.Config.Quiet
+	return emb
 }
 
 func (e *Engine) writeSubtitles(ctx context.Context, info *extractor.VideoInfo) error {

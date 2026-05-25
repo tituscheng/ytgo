@@ -52,7 +52,7 @@ func (e *Extractor) Suitable(rawURL string) bool {
 
 // Extract fetches metadata for the given YouTube URL.
 func (e *Extractor) Extract(ctx context.Context, rawURL string) (*extractor.VideoInfo, error) {
-	videoID := extractVideoID(rawURL)
+	videoID := ExtractVideoID(rawURL)
 	playlistID := extractPlaylistID(rawURL)
 
 	// If no video ID but we have a playlist ID, extract the playlist directly
@@ -245,7 +245,7 @@ func parseMimeType(mime string) (ext, vcodec, acodec string) {
 	return
 }
 
-func extractVideoID(u string) string {
+func ExtractVideoID(u string) string {
 	m := videoIDRegex.FindStringSubmatch(u)
 	if len(m) > 1 {
 		return m[1]

@@ -35,7 +35,8 @@ If you need sponsorblock, 1000+ site extractors, or `--cookies-from-browser`, yt
 - **Subtitles & Metadata Extraction**: Production-grade retry with exponential backoff + jitter for both subtitle tracks and core Innertube metadata extraction (Player/Playlist). Server `Retry-After` honored where applicable, atomic side-file writes, and structured failure reporting.
 - **Output templates**: `%(title)s`, `%(upload_date>%Y-%m-%d)s`, `%(playlist_index)s`, etc.
 - **Resume support** — identity-scoped segment-level resume, `.part` temp files, automatic re-extraction on expired URLs
-- **Download archive** to skip already-downloaded videos
+- **Skip existing downloads** — by default, skips videos already present in the output directory (use `--no-skip-existing` to force re-download)
+- **Download archive** to skip already-downloaded videos across runs (`--download-archive`)
 - **Stdout output** (`-o -`) for piping
 - **Config file** support (YAML)
 
@@ -64,8 +65,11 @@ go build -o ytgo .
 ## Quick Start
 
 ```bash
-# Download best quality
+# Download best quality (skips if already in output directory)
 ./ytgo "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+# Force re-download even when file exists
+./ytgo --no-skip-existing "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
 # List available formats
 ./ytgo --list-formats "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
@@ -241,6 +245,10 @@ ytgo has **segment-level resume** that is architecturally more robust than yt-dl
 
 # Skip existing files without re-downloading
 ./ytgo --no-overwrites "URL"
+
+# Skip is enabled by default when a video ID is already present in the output directory.
+# Include %(id)s in -o for reliable detection, or rely on the exact output path for custom templates.
+./ytgo --no-skip-existing "URL"   # force re-download
 ```
 
 **Library example:**

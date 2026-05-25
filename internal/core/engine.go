@@ -25,6 +25,7 @@ import (
 	"github.com/tituscheng/ytgo/internal/config"
 	"github.com/tituscheng/ytgo/internal/downloader"
 	"github.com/tituscheng/ytgo/internal/extractor"
+	"github.com/tituscheng/ytgo/internal/extractor/youtube"
 	"github.com/tituscheng/ytgo/internal/format"
 	"github.com/tituscheng/ytgo/internal/limiter"
 	"github.com/tituscheng/ytgo/internal/pipeline"
@@ -121,6 +122,14 @@ func (e *Engine) Run(ctx context.Context, rawURL string) (*ytgo.PlaylistReport, 
 		return nil, fmt.Errorf("no extractor found for URL: %s", rawURL)
 	}
 
+	if e.shouldEarlySkipExisting(rawURL) {
+		videoID := youtube.ExtractVideoID(rawURL)
+		if path, ok := e.lookupExistingMedia(videoID, true); ok {
+			e.logExistingSkip(videoID, "", path, "existing media found")
+			return nil, nil
+		}
+	}
+
 	e.log("extracting", slog.String("extractor", ext.Name()), slog.String("url", rawURL))
 	if e.Config.Verbose {
 		color.Yellow("[%s] Extracting: %s", ext.Name(), rawURL)
@@ -195,8 +204,12 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 			slog.String("video_id", info.ID),
 			slog.String("title", info.Title))
 		if !e.Config.Quiet {
-			color.Yellow("[%s] %s: has already been recorded in archive", info.ID, info.Title)
+			color.Green("✓ Already in archive: %s", info.Title)
 		}
+		return nil, nil
+	}
+
+	if e.skipIfExistingMedia(info.ID, info.Title) {
 		return nil, nil
 	}
 
@@ -239,11 +252,15 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 		return nil, err
 	}
 
+	if e.skipIfOutputExists(outputPath, info.ID, info.Title) {
+		return nil, nil
+	}
+
 	// --no-overwrites: skip if final file already exists
 	if e.Config.NoOverwrites && !isStdout {
 		if _, err := os.Stat(outputPath); err == nil {
 			if !e.Config.Quiet {
-				color.Yellow("[%s] %s: file already exists, skipping", info.ID, info.Title)
+				color.Green("✓ File already exists, skipping: %s", info.Title)
 			}
 			return nil, nil
 		}
@@ -357,7 +374,15 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 	finalPath := outputPath
 	if len(downloaded) > 1 || e.Config.MergeOutputFormat != "" || isStdout {
 		merger := e.makeMerger(info)
+		var mergeSpinner *spinner.Spinner
+		if !e.Config.Quiet && !e.Config.NoProgress {
+			mergeSpinner = newStatusSpinner("Merging video and audio...")
+			mergeSpinner.Start()
+		}
 		merged, err := merger.Run(ctx, downloaded, outputPath, e.Config.MergeOutputFormat)
+		if mergeSpinner != nil {
+			mergeSpinner.Stop()
+		}
 		if err != nil {
 			e.reportFailure(ytgo.DownloadFailure{
 				VideoID:   info.ID,
@@ -383,7 +408,15 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 	// The core download still uses the full segmented + resume machinery.
 	if e.Config.ExtractAudio {
 		conv := e.makeConverter(info)
+		var convertSpinner *spinner.Spinner
+		if !e.Config.Quiet && !e.Config.NoProgress {
+			convertSpinner = newStatusSpinner("Extracting audio...")
+			convertSpinner.Start()
+		}
 		converted, err := conv.ExtractAudio(ctx, finalPath, e.Config.AudioFormat, e.Config.AudioQuality)
+		if convertSpinner != nil {
+			convertSpinner.Stop()
+		}
 		if err != nil {
 			e.reportFailure(ytgo.DownloadFailure{
 				VideoID:   info.ID,
@@ -449,7 +482,7 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 	}
 
 	if !e.Config.Quiet {
-		color.Green("Downloaded: %s", finalPath)
+		printSaved(finalPath)
 	}
 	return nil
 }
@@ -626,19 +659,20 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.Video
 		slog.String("dest", dest),
 		slog.Int64("filesize", f.Filesize))
 
-	// For concurrent downloads (total > 1), skip the interactive spinner to
-	// avoid stderr interleaving. Instead, log start and completion.
+	// For concurrent downloads (total > 1), use line-based status messages to
+	// avoid spinner interleaving on stderr.
 	concurrent := total > 1
+	label := formatStreamLabel(f)
 	var s *spinner.Spinner
 	if !concurrent && !e.Config.Quiet && !e.Config.NoProgress {
-		s = spinner.New(spinner.CharSets[14], 100)
-		s.Suffix = fmt.Sprintf("  Downloading format %s", f.FormatID)
+		s = spinner.New(spinner.CharSets[14], 100*time.Millisecond)
+		s.Suffix = fmt.Sprintf("  Downloading %s...", label)
 		s.Start()
 		defer s.Stop()
 	} else if concurrent && !e.Config.Quiet {
-		color.Yellow("[start] format %s → %s", f.FormatID, dest)
+		printDownloading(label)
 		defer func() {
-			color.Green("[done]  format %s → %s", f.FormatID, dest)
+			printDownloadComplete(label)
 		}()
 	}
 
@@ -656,7 +690,7 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.Video
 		}
 		if s != nil && tot > 0 {
 			pct := float64(down) / float64(tot) * 100
-			s.Suffix = fmt.Sprintf("  Downloading format %s (%.1f%%)", f.FormatID, pct)
+			s.Suffix = fmt.Sprintf("  Downloading %s (%.1f%%)", label, pct)
 		}
 	}
 
@@ -876,7 +910,7 @@ func (e *Engine) makeMerger(info *extractor.VideoInfo) *postprocessor.Merger {
 	} else {
 		m = postprocessor.NewMerger(e.Config.FFmpegLocation)
 	}
-	m.Quiet = e.Config.Quiet
+	m.Quiet = e.Config.Quiet || !e.Config.Verbose
 	return m
 }
 
@@ -888,7 +922,7 @@ func (e *Engine) makeConverter(info *extractor.VideoInfo) *postprocessor.Convert
 	} else {
 		c = postprocessor.NewConverter(e.Config.FFmpegLocation)
 	}
-	c.Quiet = e.Config.Quiet
+	c.Quiet = e.Config.Quiet || !e.Config.Verbose
 	return c
 }
 
@@ -902,7 +936,7 @@ func (e *Engine) makeEmbedder(info *extractor.VideoInfo, client *http.Client) *p
 	} else {
 		emb = postprocessor.NewEmbedder(e.Config.FFmpegLocation)
 	}
-	emb.Quiet = e.Config.Quiet
+	emb.Quiet = e.Config.Quiet || !e.Config.Verbose
 	return emb
 }
 

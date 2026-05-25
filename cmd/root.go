@@ -82,6 +82,8 @@ func init() {
 	rootCmd.Flags().Bool("simulate", false, "Simulate download (do not write files)")
 	rootCmd.Flags().String("download-archive", "", "File to record downloaded IDs")
 	rootCmd.Flags().Bool("no-overwrites", false, "Do not overwrite files")
+	rootCmd.Flags().Bool("skip-existing", cfg.SkipExisting, "Skip download when video already exists in output directory")
+	rootCmd.Flags().Bool("no-skip-existing", false, "Download even when video already exists in output directory")
 	rootCmd.Flags().Bool("no-continue", false, "Do not resume partial downloads")
 
 	// Audio extraction
@@ -147,9 +149,12 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 	_ = viper.Unmarshal(&cfg)
 
-	// Handle the one inverted flag that viper cannot express directly
+	// Handle inverted flags that viper cannot express directly
 	if noContinue, _ := cmd.Flags().GetBool("no-continue"); noContinue {
 		cfg.ContinuePartial = false
+	}
+	if noSkipExisting, _ := cmd.Flags().GetBool("no-skip-existing"); noSkipExisting {
+		cfg.SkipExisting = false
 	}
 
 	// Validate subtitle format at the CLI boundary so we fail fast with a

@@ -137,6 +137,120 @@ func TestEngineRun_Archive(t *testing.T) {
 	assert.Contains(t, string(data), "test123")
 }
 
+func TestEngineRun_SkipExisting(t *testing.T) {
+	tmpDir := t.TempDir()
+	videoID := "abc12345678"
+	outPath := filepath.Join(tmpDir, "My Video ["+videoID+"].mp4")
+	require.NoError(t, os.WriteFile(outPath, []byte("existing"), 0644))
+
+	var requestCount int
+	content := []byte("fake video content")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	info := &ytgo.VideoInfo{
+		ID:    videoID,
+		Title: "My Video",
+		Formats: []ytgo.Format{
+			{FormatID: "1", URL: srv.URL, Ext: "mp4", HasVideo: true, HasAudio: true},
+		},
+	}
+	cfg := config.DownloadOptions{
+		OutputTemplate: "%(title)s [%(id)s].%(ext)s",
+		Paths:          tmpDir,
+		NoProgress:     true,
+		SkipExisting:   true,
+	}
+	eng := NewEngine(cfg)
+	eng.Register(&mockExtractor{info: info})
+
+	videoURL := "https://www.youtube.com/watch?v=" + videoID
+	_, err := eng.Run(context.Background(), videoURL)
+	require.NoError(t, err)
+	assert.Equal(t, 0, requestCount)
+
+	data, err := os.ReadFile(outPath)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("existing"), data)
+}
+
+func TestEngineRun_SkipExisting_AfterDownload(t *testing.T) {
+	var requestCount int
+	content := []byte("fake video content")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	tmpDir := t.TempDir()
+	videoID := "abc12345678"
+	info := &ytgo.VideoInfo{
+		ID:    videoID,
+		Title: "My Video",
+		Formats: []ytgo.Format{
+			{FormatID: "1", URL: srv.URL, Ext: "mp4", HasVideo: true, HasAudio: true},
+		},
+	}
+	cfg := config.DownloadOptions{
+		OutputTemplate: "%(title)s [%(id)s].%(ext)s",
+		Paths:          tmpDir,
+		NoProgress:     true,
+		SkipExisting:   true,
+	}
+	eng := NewEngine(cfg)
+	eng.Register(&mockExtractor{info: info})
+
+	videoURL := "https://www.youtube.com/watch?v=" + videoID
+	_, err := eng.Run(context.Background(), videoURL)
+	require.NoError(t, err)
+
+	before := requestCount
+	_, err = eng.Run(context.Background(), videoURL)
+	require.NoError(t, err)
+	assert.Equal(t, before, requestCount)
+}
+
+func TestEngineRun_SkipExisting_ForceRedownload(t *testing.T) {
+	var requestCount int
+	content := []byte("fake video content")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	tmpDir := t.TempDir()
+	videoID := "abc12345678"
+	info := &ytgo.VideoInfo{
+		ID:    videoID,
+		Title: "My Video",
+		Formats: []ytgo.Format{
+			{FormatID: "1", URL: srv.URL, Ext: "mp4", HasVideo: true, HasAudio: true},
+		},
+	}
+	cfg := config.DownloadOptions{
+		OutputTemplate: "%(title)s [%(id)s].%(ext)s",
+		Paths:          tmpDir,
+		NoProgress:     true,
+		SkipExisting:   false,
+	}
+	eng := NewEngine(cfg)
+	eng.Register(&mockExtractor{info: info})
+
+	videoURL := "https://www.youtube.com/watch?v=" + videoID
+	_, err := eng.Run(context.Background(), videoURL)
+	require.NoError(t, err)
+
+	before := requestCount
+	_, err = eng.Run(context.Background(), videoURL)
+	require.NoError(t, err)
+	assert.Greater(t, requestCount, before)
+}
+
 func TestBuildOutputPath(t *testing.T) {
 	info := &ytgo.VideoInfo{ID: "abc", Title: "My Video", UploadDate: "20240115"}
 	cfg := config.DownloadOptions{OutputTemplate: "%(upload_date>%Y-%m-%d)s - %(title)s.%(ext)s"}

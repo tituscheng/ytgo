@@ -47,6 +47,7 @@ type DownloadOptions struct {
 	SkipDownload    bool   `mapstructure:"skip-download"`
 	DownloadArchive string `mapstructure:"download-archive"`
 	NoOverwrites    bool   `mapstructure:"no-overwrites"`
+	SkipExisting    bool   `mapstructure:"skip-existing"`
 	ContinuePartial bool   `mapstructure:"continue"`
 
 	// Audio extraction
@@ -113,6 +114,7 @@ func DefaultOptions() DownloadOptions {
 	return DownloadOptions{
 		Format:              "bv*+ba/best",
 		OutputTemplate:      "%(title)s [%(id)s].%(ext)s",
+		SkipExisting:        true,
 		ContinuePartial:     true,
 		PlaylistStart:       1,
 		ConcurrentFragments: 1,

@@ -17,10 +17,10 @@ func TestSuitable(t *testing.T) {
 }
 
 func TestExtractVideoID(t *testing.T) {
-	assert.Equal(t, "dQw4w9WgXcQ", extractVideoID("https://www.youtube.com/watch?v=dQw4w9WgXcQ"))
-	assert.Equal(t, "dQw4w9WgXcQ", extractVideoID("https://youtu.be/dQw4w9WgXcQ"))
-	assert.Equal(t, "abcdefgH123", extractVideoID("https://www.youtube.com/shorts/abcdefgH123"))
-	assert.Equal(t, "", extractVideoID("https://example.com"))
+	assert.Equal(t, "dQw4w9WgXcQ", ExtractVideoID("https://www.youtube.com/watch?v=dQw4w9WgXcQ"))
+	assert.Equal(t, "dQw4w9WgXcQ", ExtractVideoID("https://youtu.be/dQw4w9WgXcQ"))
+	assert.Equal(t, "abcdefgH123", ExtractVideoID("https://www.youtube.com/shorts/abcdefgH123"))
+	assert.Equal(t, "", ExtractVideoID("https://example.com"))
 }
 
 func TestExtractPlaylistID(t *testing.T) {

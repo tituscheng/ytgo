@@ -183,11 +183,23 @@ func (c *Converter) ExtractAudio(ctx context.Context, input, audioFormat, qualit
 		ext = ".flac"
 	case "vorbis", "ogg":
 		ext = ".ogg"
+	case "best", "":
+		ext = filepath.Ext(input)
+		if ext == "" {
+			ext = ".m4a"
+		}
 	default:
 		ext = ".m4a"
 	}
 
 	output := strings.TrimSuffix(input, filepath.Ext(input)) + ext
+	inPlace := filepath.Clean(output) == filepath.Clean(input)
+	if inPlace {
+		// Keep the real extension last so ffmpeg can still auto-detect the
+		// output muxer (a bare ".tmp" suffix yields "Unable to choose an
+		// output format").
+		output = input + ".tmp" + ext
+	}
 	args := append(ffmpegBaseArgs(c.Quiet), "-i", input)
 
 	// Audio codec selection
@@ -207,16 +219,27 @@ func (c *Converter) ExtractAudio(ctx context.Context, input, audioFormat, qualit
 		args = append(args, "-c:a", "flac")
 	case "vorbis", "ogg":
 		args = append(args, "-c:a", "libvorbis")
-	default:
+	case "best", "":
 		args = append(args, "-c:a", "copy")
+	default:
+		args = append(args, "-c:a", "aac", "-b:a", "192k")
 	}
 
-	args = append(args, "-vn", output)
+	args = append(args, "-vn")
 	if isMP4Family(ext) {
 		args = append(args, "-movflags", "+faststart")
 	}
+	args = append(args, output)
 	if err := runFFmpeg(ctx, c.ffmpeg, c.prefix, c.Quiet, args...); err != nil {
+		removeFile(output)
 		return "", fmt.Errorf("ffmpeg convert: %w", err)
+	}
+	if inPlace {
+		if err := os.Rename(output, input); err != nil {
+			removeFile(output)
+			return "", fmt.Errorf("rename: %w", err)
+		}
+		return input, nil
 	}
 	return output, nil
 }
@@ -305,8 +328,9 @@ func (e *Embedder) Run(ctx context.Context, path string, info *extractor.VideoIn
 		args = append(args, "-movflags", "+faststart")
 	}
 
-	// Need a temp output
-	tmpPath := path + ".tmp"
+	// Need a temp output. Keep the original extension last so ffmpeg can
+	// auto-detect the output muxer (a bare ".tmp" suffix fails).
+	tmpPath := path + ".tmp" + filepath.Ext(path)
 	args = append(args, tmpPath)
 
 	if err := runFFmpeg(ctx, e.ffmpeg, e.prefix, e.Quiet, args...); err != nil {

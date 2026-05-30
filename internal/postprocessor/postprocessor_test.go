@@ -303,6 +303,41 @@ func TestConverterAutoFastStart_M4A(t *testing.T) {
 	assert.Contains(t, args, "+faststart")
 }
 
+func TestConverterSameInputOutput(t *testing.T) {
+	tmpDir := t.TempDir()
+	ffmpeg, argsFile := mockFFmpeg(t, tmpDir)
+
+	input := filepath.Join(tmpDir, "input.m4a")
+	require.NoError(t, os.WriteFile(input, []byte("audio"), 0644))
+
+	c := NewConverter(ffmpeg)
+	got, err := c.ExtractAudio(context.Background(), input, "m4a", "5")
+	require.NoError(t, err)
+	assert.Equal(t, input, got)
+	assert.FileExists(t, input)
+
+	args := readArgs(t, argsFile)
+	assert.Contains(t, args, filepath.Join(tmpDir, "input.m4a.tmp"))
+}
+
+func TestConverterBestPreservesContainer(t *testing.T) {
+	tmpDir := t.TempDir()
+	ffmpeg, argsFile := mockFFmpeg(t, tmpDir)
+
+	input := filepath.Join(tmpDir, "input.webm")
+	require.NoError(t, os.WriteFile(input, []byte("audio"), 0644))
+
+	c := NewConverter(ffmpeg)
+	got, err := c.ExtractAudio(context.Background(), input, "best", "5")
+	require.NoError(t, err)
+	assert.Equal(t, input, got)
+
+	args := readArgs(t, argsFile)
+	assert.Contains(t, args, filepath.Join(tmpDir, "input.webm.tmp"))
+	assert.Contains(t, args, "-c:a copy")
+	assert.NotContains(t, args, "-movflags")
+}
+
 func TestConverterAutoFastStart_MP3(t *testing.T) {
 	tmpDir := t.TempDir()
 	ffmpeg, argsFile := mockFFmpeg(t, tmpDir)

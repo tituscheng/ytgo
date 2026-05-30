@@ -156,6 +156,9 @@ func run(cmd *cobra.Command, args []string) error {
 	if noSkipExisting, _ := cmd.Flags().GetBool("no-skip-existing"); noSkipExisting {
 		cfg.SkipExisting = false
 	}
+	if cfg.ExtractAudio && cfg.Format == config.DefaultOptions().Format && !cmd.Flags().Changed("format") {
+		cfg.Format = "ba/best"
+	}
 
 	// Validate subtitle format at the CLI boundary so we fail fast with a
 	// clear message instead of partway through a download.

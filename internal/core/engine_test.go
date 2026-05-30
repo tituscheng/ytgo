@@ -260,6 +260,25 @@ func TestBuildOutputPath(t *testing.T) {
 	assert.Equal(t, "2024-01-15 - My Video.mp4", path)
 }
 
+func TestBuildOutputPath_ExtractAudioSingleFormat(t *testing.T) {
+	info := &ytgo.VideoInfo{ID: "abc", Title: "My Video"}
+	eng := NewEngine(config.DownloadOptions{ExtractAudio: true, AudioFormat: "m4a"})
+	path, err := eng.buildOutputPath(info, []ytgo.Format{{Ext: "m4a", HasAudio: true}})
+	require.NoError(t, err)
+	assert.Equal(t, "My Video [abc].m4a", path)
+}
+
+func TestBuildOutputPath_ExtractAudioMultiFormat(t *testing.T) {
+	info := &ytgo.VideoInfo{ID: "abc", Title: "My Video"}
+	eng := NewEngine(config.DownloadOptions{ExtractAudio: true, AudioFormat: "m4a"})
+	path, err := eng.buildOutputPath(info, []ytgo.Format{
+		{Ext: "webm", VideoCodec: "vp9", HasVideo: true},
+		{Ext: "m4a", AudioCodec: "mp4a", HasAudio: true},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "My Video [abc].mkv", path)
+}
+
 func TestEngineRun_DownloadWithProgress(t *testing.T) {
 	content := []byte("fake video content")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

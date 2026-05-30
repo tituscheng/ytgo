@@ -823,6 +823,17 @@ func (e *Engine) reextract(ctx context.Context, info *extractor.VideoInfo) (*ext
 	return nil, fmt.Errorf("no extractor found for re-extraction")
 }
 
+func mergeContainerExt(selected []extractor.Format) string {
+	// MKV accepts any codec combination via stream copy; use it when any stream
+	// is in a WebM-native codec/container so merge does not fail on remux.
+	for _, f := range selected {
+		if f.Ext == "webm" || strings.HasPrefix(f.VideoCodec, "vp") || f.AudioCodec == "opus" || f.AudioCodec == "vorbis" {
+			return "mkv"
+		}
+	}
+	return "mp4"
+}
+
 func (e *Engine) buildOutputPath(info *extractor.VideoInfo, selected []extractor.Format) (string, error) {
 	tmpl := e.Config.OutputTemplate
 	if tmpl == "" {
@@ -836,11 +847,10 @@ func (e *Engine) buildOutputPath(info *extractor.VideoInfo, selected []extractor
 	}
 	if e.Config.MergeOutputFormat != "" {
 		ext = e.Config.MergeOutputFormat
-	} else if e.Config.ExtractAudio {
-		ext = e.Config.AudioFormat
-		if ext == "best" || ext == "" {
-			ext = "m4a"
-		}
+	} else if e.Config.ExtractAudio && len(selected) > 1 {
+		// Merge before audio extraction must use a video container; the final
+		// audio extension is applied by ExtractAudio after merge.
+		ext = mergeContainerExt(selected)
 	}
 	if ext == "" {
 		ext = "mp4"

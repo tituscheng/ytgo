@@ -58,7 +58,7 @@ Both paths converge on `core.Engine.Run()`, which is the single entry point for 
 **Why a separate package?** `pkg/` is the conventional Go location for public library surface. Internal packages can still change; `pkg/ytgo/api` is the stability contract.
 
 **Callbacks:** The API exposes two lifecycle hooks on `DownloadOptions`:
-- `OnProgress` — aggregated download progress (bytes downloaded / total)
+- `OnProgress` — structured `ytgo.Progress` events for every phase (download, merge, audio). Carries `VideoID`/`Phase`/`FormatID`; use `Progress.Fraction()` for a unit-independent ratio. Serialized by the engine, so the callback need not be concurrency-safe.
 - `OnError` — structured failure report for every video that fails (playlist-safe)
 
 **Playlist Report:** `Engine.Run()` returns a `*ytgo.PlaylistReport` for playlist URLs containing `Total`, `Succeeded`, `Skipped`, and `Failed` counts.
@@ -200,7 +200,7 @@ d.Progress = func(down, total int64) { /* update spinner */ }
 err := d.DownloadToFile(ctx, url, "/path/to/video.mp4")
 ```
 
-**Progress aggregation:** When the caller sets `config.OnProgress` and multiple formats are selected (`bv+ba`), the engine aggregates per-format progress into a single callback via `progressAggregate`.
+**Progress reporting:** The downloader's low-level `Progress func(down, total int64)` reports bytes for one stream. The engine translates these into structured `ytgo.Progress` events (one per `FormatID`, all sharing the video's `VideoID`) and forwards them through the serialized `Engine.reportProgress`. Per-video aggregation across formats is left to the consumer; ffmpeg merge/audio phases report through the same path using `-progress pipe:1` output measured against the media duration.
 
 - **Bounded chunks:** All requests use `Range: bytes=N-M` with a maximum chunk size of ~10 MB. YouTube's CDN throttles unbounded ranges (`bytes=0-`) to ~32 KB/s on some videos.
 - **Segmented downloads:** Files are split into chunks. With `Workers > 1`, chunks are downloaded concurrently via `errgroup.Group`. With `Workers == 1`, chunks are downloaded sequentially.

@@ -138,20 +138,34 @@ opts.FormatFilter = func(f ytgo.Format) bool {
 
 ## Progress Callback
 
-Instead of parsing yt-dlp's `[download] X.X%` stdout lines, ytgo exposes a structured callback:
+Instead of parsing yt-dlp's `[download] X.X%` stdout lines, ytgo exposes a single
+structured callback that covers every phase — download, merge, and audio extraction:
 
 ```go
 opts := api.DefaultOptions()
-opts.OnProgress = func(downloaded, total int64) {
-    pct := float64(downloaded) / float64(total) * 100
-    fmt.Printf("Downloaded: %.1f%%\n", pct)
+opts.OnProgress = func(p ytgo.Progress) {
+    if f := p.Fraction(); f >= 0 {
+        fmt.Printf("[%s] %s: %.1f%%\n", p.Phase, p.Title, f*100)
+    }
 }
 err := api.Download(ctx, url, opts)
 ```
 
-For multi-format downloads (`bv+ba`), progress is **automatically aggregated** across all formats — you get a single callback showing total video progress.
+`Progress.Fraction()` returns completion in `[0,1]`, or `-1` when the total isn't
+known yet (render an indeterminate indicator rather than a bar). `Cur`/`Tot` are
+opaque units that depend on the phase — bytes for `PhaseDownload`, milliseconds of
+media time for `PhaseMerge` and `PhaseAudio` — but most consumers only need
+`Fraction()` and `Phase`.
 
-When downloading with concurrent segment workers (`Workers > 1`), `OnProgress` still reports global byte progress against the full file size, not per-segment totals.
+The engine **serializes** calls to `OnProgress`, so your callback does not need to
+be safe for concurrent use even during concurrent playlist downloads or
+post-processing.
+
+Identity is carried on every event: for multi-format downloads (`bv+ba`) you get one
+event per `FormatID`, all sharing the same `VideoID` — aggregate by `VideoID` if you
+want a single per-video number. When downloading with concurrent segment workers
+(`Workers > 1`), download events report global byte progress against the full file
+size, not per-segment totals.
 
 ---
 
@@ -383,8 +397,8 @@ func main() {
 
 ```go
 opts := api.DefaultOptions()
-opts.OnProgress = func(down, tot int64) {
-    // Emit to your UI framework (Wails, Fyne, etc.)
+opts.OnProgress = func(p ytgo.Progress) {
+    // Emit p.Phase / p.Title / p.Fraction() to your UI framework (Wails, Fyne, etc.)
 }
 err := api.Download(ctx, url, opts)
 ```

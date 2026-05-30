@@ -301,10 +301,10 @@ func TestEngineRun_DownloadWithProgress(t *testing.T) {
 		OutputTemplate: "%(title)s [%(id)s].%(ext)s",
 		Paths:          tmpDir,
 		NoProgress:     true,
-		OnProgress: func(down, tot int64) {
+		OnProgress: func(p ytgo.Progress) {
 			progressCalled = true
-			finalDown = down
-			finalTot = tot
+			finalDown = p.Cur
+			finalTot = p.Tot
 		},
 	}
 	eng := NewEngine(cfg)
@@ -344,29 +344,6 @@ func TestEngineRun_EnrichMetadata(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(tmpDir, "My Video [test123].info.json"))
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "\"like_count\": 42000")
-}
-
-func TestProgressAggregate(t *testing.T) {
-	var calls []struct{ down, tot int64 }
-	pa := newProgressAggregate(func(down, tot int64) {
-		calls = append(calls, struct{ down, tot int64 }{down, tot})
-	})
-
-	pa.report("v1", 100, 1000)
-	require.Len(t, calls, 1)
-	assert.Equal(t, int64(100), calls[0].down)
-	assert.Equal(t, int64(1000), calls[0].tot)
-
-	pa.report("a1", 200, 500)
-	require.Len(t, calls, 2)
-	assert.Equal(t, int64(300), calls[1].down)
-	assert.Equal(t, int64(1500), calls[1].tot)
-
-	// Update an existing format
-	pa.report("v1", 500, 1000)
-	require.Len(t, calls, 3)
-	assert.Equal(t, int64(700), calls[2].down)
-	assert.Equal(t, int64(1500), calls[2].tot)
 }
 
 func TestHumanSize(t *testing.T) {

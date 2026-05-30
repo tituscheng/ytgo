@@ -82,8 +82,11 @@ type DownloadOptions struct {
 	// Metadata enrichment (slower — makes secondary API calls)
 	EnrichMetadata bool `mapstructure:"enrich-metadata"`
 
-	// Progress callback (library use only — not settable via CLI/config file)
-	OnProgress func(downloaded, total int64) `mapstructure:"-"`
+	// OnProgress receives structured progress events for every phase (download,
+	// merge, audio extraction). Library use only — not settable via CLI/config
+	// file. The engine serializes calls, so the callback need not be safe for
+	// concurrent use.
+	OnProgress ytgo.ProgressFunc `mapstructure:"-"`
 
 	// OnError is called for every video that fails during processing.
 	// Library/CLI code sets it directly; not configurable via config file.

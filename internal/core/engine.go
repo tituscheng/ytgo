@@ -43,40 +43,20 @@ type Engine struct {
 	Config     config.DownloadOptions
 	Transport  *http.Transport
 
-	onErrorMu sync.Mutex
+	onErrorMu    sync.Mutex
+	onProgressMu sync.Mutex
 }
 
-// progressAggregate sums per-format download progress into a single callback.
-type progressAggregate struct {
-	mu       sync.Mutex
-	byFormat map[string]int64
-	totals   map[string]int64
-	callback func(downloaded, total int64)
-}
-
-func newProgressAggregate(cb func(downloaded, total int64)) *progressAggregate {
-	return &progressAggregate{
-		byFormat: make(map[string]int64),
-		totals:   make(map[string]int64),
-		callback: cb,
+// reportProgress invokes the user-configured OnProgress callback, if set.
+// Calls are serialized so the callback need not be safe for concurrent use,
+// even under concurrent playlist downloads or post-processing.
+func (e *Engine) reportProgress(p ytgo.Progress) {
+	if e.Config.OnProgress == nil {
+		return
 	}
-}
-
-func (pa *progressAggregate) report(formatID string, down, tot int64) {
-	pa.mu.Lock()
-	pa.byFormat[formatID] = down
-	pa.totals[formatID] = tot
-	var sumDown, sumTot int64
-	for _, v := range pa.byFormat {
-		sumDown += v
-	}
-	for _, v := range pa.totals {
-		sumTot += v
-	}
-	pa.mu.Unlock()
-	if pa.callback != nil {
-		pa.callback(sumDown, sumTot)
-	}
+	e.onProgressMu.Lock()
+	defer e.onProgressMu.Unlock()
+	e.Config.OnProgress(p)
 }
 
 // NewEngine builds an Engine with default YouTube support.
@@ -268,13 +248,6 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 
 	downloaded := make([]string, len(selected))
 
-	// Set up progress aggregation when the caller provides a callback and
-	// there are multiple formats to download.
-	var pa *progressAggregate
-	if e.Config.OnProgress != nil && len(selected) > 1 {
-		pa = newProgressAggregate(e.Config.OnProgress)
-	}
-
 	if len(selected) == 1 {
 		partPath := outputPath + ".part"
 		finalPath := outputPath
@@ -284,7 +257,7 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 			temps.Push(partPath)
 			temps.Push(finalPath)
 		}
-		if err := e.downloadFormatToFile(ctx, info, selected[0], partPath, 1, 1, pa); err != nil {
+		if err := e.downloadFormatToFile(ctx, info, selected[0], partPath, 1, 1); err != nil {
 			e.reportFailure(ytgo.DownloadFailure{
 				VideoID:   info.ID,
 				Title:     info.Title,
@@ -325,7 +298,7 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 					temps.Push(partPath)
 					temps.Push(finalPath)
 				}
-				if err := e.downloadFormatToFile(gctx, info, f, partPath, i+1, len(selected), pa); err != nil {
+				if err := e.downloadFormatToFile(gctx, info, f, partPath, i+1, len(selected)); err != nil {
 					e.reportFailure(ytgo.DownloadFailure{
 						VideoID:   info.ID,
 						Title:     info.Title,
@@ -652,7 +625,7 @@ func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) (*y
 	return report, postprocErr
 }
 
-func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.VideoInfo, f extractor.Format, dest string, current, total int, pa *progressAggregate) error {
+func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.VideoInfo, f extractor.Format, dest string, current, total int) error {
 	e.log("starting format download",
 		slog.String("video_id", info.ID),
 		slog.String("format_id", f.FormatID),
@@ -678,16 +651,18 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.Video
 
 	clen := downloader.ParseContentLengthFromURL(f.URL)
 
-	// Build the progress callback: user callback + spinner + aggregation
+	// Build the progress callback: structured event (one per format) + spinner.
+	// Per-video aggregation across formats is the consumer's responsibility;
+	// events carry FormatID so they can sum by VideoID if desired.
 	progressCb := func(down, tot int64) {
-		if e.Config.OnProgress != nil && pa == nil {
-			// Single-format download: report directly
-			e.Config.OnProgress(down, tot)
-		}
-		if pa != nil {
-			// Multi-format download: aggregate before reporting
-			pa.report(f.FormatID, down, tot)
-		}
+		e.reportProgress(ytgo.Progress{
+			VideoID:  info.ID,
+			Title:    info.Title,
+			Phase:    ytgo.PhaseDownload,
+			FormatID: f.FormatID,
+			Cur:      down,
+			Tot:      tot,
+		})
 		if s != nil && tot > 0 {
 			pct := float64(down) / float64(tot) * 100
 			s.Suffix = fmt.Sprintf("  Downloading %s (%.1f%%)", label, pct)

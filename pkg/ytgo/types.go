@@ -85,6 +85,52 @@ type VideoInfo struct {
 // FormatFilter is a user-provided predicate for filtering formats.
 type FormatFilter func(Format) bool
 
+// Phase identifies which stage of processing a Progress event describes.
+type Phase string
+
+const (
+	PhaseDownload Phase = "download" // fetching a media stream over HTTP
+	PhaseMerge    Phase = "merge"    // muxing separate audio/video tracks
+	PhaseAudio    Phase = "audio"    // extracting/transcoding audio
+	PhaseEmbed    Phase = "embed"    // embedding metadata/thumbnail/subs
+)
+
+// Progress reports the advancement of one processing phase for one video.
+//
+// Cur and Tot are opaque units that depend on Phase (bytes for PhaseDownload,
+// milliseconds of media time for the ffmpeg phases). Consumers that only want
+// a progress bar should use Fraction and ignore the raw units. Tot is <= 0 when
+// the total is not yet known.
+//
+// During concurrent or multi-format work the same VideoID is reported across
+// several events (one per FormatID for downloads, one per phase otherwise);
+// aggregate by VideoID if a single per-video number is desired.
+type Progress struct {
+	VideoID  string
+	Title    string
+	Phase    Phase
+	FormatID string // set for PhaseDownload; empty otherwise
+	Cur      int64
+	Tot      int64
+}
+
+// Fraction returns completion in the range [0,1], or -1 when the total is
+// unknown (in which case render an indeterminate indicator rather than a bar).
+func (p Progress) Fraction() float64 {
+	if p.Tot <= 0 {
+		return -1
+	}
+	f := float64(p.Cur) / float64(p.Tot)
+	if f > 1 {
+		return 1
+	}
+	return f
+}
+
+// ProgressFunc receives Progress events. The engine serializes invocations, so
+// implementations need not be safe for concurrent use.
+type ProgressFunc func(Progress)
+
 // DownloadFailure captures structured context about a single failed video.
 type DownloadFailure struct {
 	VideoID   string `json:"video_id"`

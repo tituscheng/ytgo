@@ -36,21 +36,40 @@ func findFFmpeg(preferred string) string {
 }
 
 // runFFmpeg executes an ffmpeg command.
-// When quiet is true, or prefix is non-empty (concurrent post-processing), output is
-// captured instead of streaming to the terminal. Prefixed output is emitted only when
-// quiet is false. On failure, stderr is included in the returned error.
-func runFFmpeg(ctx context.Context, ffmpeg string, prefix string, quiet bool, args ...string) error {
+//
+// When quiet is true, or prefix is non-empty (concurrent post-processing),
+// output is captured instead of streaming to the terminal. Prefixed output is
+// emitted only when quiet is false. On failure, stderr is included in the
+// returned error.
+//
+// When onProgress is non-nil, ffmpeg's stdout is parsed as `-progress` output
+// (the caller is responsible for adding `-progress pipe:1` to args) and the
+// callback receives the latest out_time in milliseconds. ffmpeg's normal
+// human-readable output continues to go to stderr per the modes above, so a
+// progress parser composes with any of them.
+func runFFmpeg(ctx context.Context, ffmpeg string, prefix string, quiet bool, onProgress func(outMs int64), args ...string) error {
 	cmd := exec.CommandContext(ctx, ffmpeg, args...)
 
+	// stderr is shown directly in interactive mode (no prefix, not quiet) and
+	// captured otherwise (for prefixing and/or error reporting).
+	var stderrBuf bytes.Buffer
 	if prefix == "" && !quiet {
-		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		return cmd.Run()
+	} else {
+		cmd.Stderr = &stderrBuf
 	}
 
-	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
+	// stdout carries `-progress` machine output when requested; otherwise it
+	// follows the same interactive-vs-captured rule as stderr.
+	var stdoutBuf bytes.Buffer
+	switch {
+	case onProgress != nil:
+		cmd.Stdout = &progressParser{cb: onProgress}
+	case prefix == "" && !quiet:
+		cmd.Stdout = os.Stdout
+	default:
+		cmd.Stdout = &stdoutBuf
+	}
 
 	err := cmd.Run()
 
@@ -63,7 +82,7 @@ func runFFmpeg(ctx context.Context, ffmpeg string, prefix string, quiet bool, ar
 				fmt.Fprintf(os.Stderr, "%s%s\n", prefix, line)
 			}
 		}
-		writePrefixed(&stdoutBuf)
+		writePrefixed(&stdoutBuf) // empty when a progress parser consumed stdout
 		writePrefixed(&stderrBuf)
 	}
 
@@ -74,6 +93,37 @@ func runFFmpeg(ctx context.Context, ffmpeg string, prefix string, quiet bool, ar
 		}
 	}
 	return err
+}
+
+// progressParser is an io.Writer that scans ffmpeg `-progress pipe:1` output
+// (newline-separated key=value pairs) and invokes cb with the most recent
+// out_time, in milliseconds. Partial lines are buffered across writes.
+type progressParser struct {
+	buf []byte
+	cb  func(outMs int64)
+}
+
+func (p *progressParser) Write(b []byte) (int, error) {
+	p.buf = append(p.buf, b...)
+	for {
+		i := bytes.IndexByte(p.buf, '\n')
+		if i < 0 {
+			break
+		}
+		line := p.buf[:i]
+		p.buf = p.buf[i+1:]
+		key, val, ok := bytes.Cut(line, []byte{'='})
+		if !ok {
+			continue
+		}
+		// out_time_us is microseconds of media processed so far.
+		if string(bytes.TrimSpace(key)) == "out_time_us" {
+			if us, err := strconv.ParseInt(string(bytes.TrimSpace(val)), 10, 64); err == nil && us >= 0 {
+				p.cb(us / 1000)
+			}
+		}
+	}
+	return len(b), nil
 }
 
 func ffmpegBaseArgs(quiet bool) []string {
@@ -97,6 +147,9 @@ type Merger struct {
 	ffmpeg string
 	prefix string // non-empty only when concurrent post-processing is enabled (prevents interleaving)
 	Quiet  bool    // suppress ffmpeg progress output (library / --quiet mode)
+	// Progress, when set, receives the media time processed so far (ms).
+	// Enabling it adds `-progress pipe:1` to the ffmpeg invocation.
+	Progress func(outMs int64)
 }
 
 // NewMerger creates a Merger (no output prefix).
@@ -126,6 +179,9 @@ func (m *Merger) Run(ctx context.Context, inputs []string, outputPath, forceExt 
 	}
 
 	args := ffmpegBaseArgs(m.Quiet)
+	if m.Progress != nil {
+		args = append(args, "-progress", "pipe:1")
+	}
 	for _, in := range inputs {
 		args = append(args, "-i", in)
 	}
@@ -140,7 +196,7 @@ func (m *Merger) Run(ctx context.Context, inputs []string, outputPath, forceExt 
 	}
 	args = append(args, outputPath)
 
-	if err := runFFmpeg(ctx, m.ffmpeg, m.prefix, m.Quiet, args...); err != nil {
+	if err := runFFmpeg(ctx, m.ffmpeg, m.prefix, m.Quiet, m.Progress, args...); err != nil {
 		return "", fmt.Errorf("ffmpeg merge: %w", err)
 	}
 	return outputPath, nil
@@ -151,6 +207,9 @@ type Converter struct {
 	ffmpeg string
 	prefix string
 	Quiet  bool
+	// Progress, when set, receives the media time processed so far (ms).
+	// Enabling it adds `-progress pipe:1` to the ffmpeg invocation.
+	Progress func(outMs int64)
 }
 
 // NewConverter creates a Converter (no output prefix).
@@ -200,7 +259,11 @@ func (c *Converter) ExtractAudio(ctx context.Context, input, audioFormat, qualit
 		// output format").
 		output = input + ".tmp" + ext
 	}
-	args := append(ffmpegBaseArgs(c.Quiet), "-i", input)
+	base := ffmpegBaseArgs(c.Quiet)
+	if c.Progress != nil {
+		base = append(base, "-progress", "pipe:1")
+	}
+	args := append(base, "-i", input)
 
 	// Audio codec selection
 	switch audioFormat {
@@ -230,7 +293,7 @@ func (c *Converter) ExtractAudio(ctx context.Context, input, audioFormat, qualit
 		args = append(args, "-movflags", "+faststart")
 	}
 	args = append(args, output)
-	if err := runFFmpeg(ctx, c.ffmpeg, c.prefix, c.Quiet, args...); err != nil {
+	if err := runFFmpeg(ctx, c.ffmpeg, c.prefix, c.Quiet, c.Progress, args...); err != nil {
 		removeFile(output)
 		return "", fmt.Errorf("ffmpeg convert: %w", err)
 	}
@@ -333,7 +396,7 @@ func (e *Embedder) Run(ctx context.Context, path string, info *extractor.VideoIn
 	tmpPath := path + ".tmp" + filepath.Ext(path)
 	args = append(args, tmpPath)
 
-	if err := runFFmpeg(ctx, e.ffmpeg, e.prefix, e.Quiet, args...); err != nil {
+	if err := runFFmpeg(ctx, e.ffmpeg, e.prefix, e.Quiet, nil, args...); err != nil {
 		removeFile(tmpPath)
 		return fmt.Errorf("ffmpeg embed: %w", err)
 	}

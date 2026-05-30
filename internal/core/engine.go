@@ -59,6 +59,34 @@ func (e *Engine) reportProgress(p ytgo.Progress) {
 	e.Config.OnProgress(p)
 }
 
+// ffmpegProgress builds the callback handed to a post-processor for a given
+// phase. It forwards ffmpeg's out_time (ms) as structured Progress events
+// (against the known media duration) and updates the status spinner. It
+// returns nil when nothing would consume progress, leaving the ffmpeg
+// invocation unchanged in that case.
+func (e *Engine) ffmpegProgress(info *extractor.VideoInfo, phase ytgo.Phase, label string, s *spinner.Spinner) func(outMs int64) {
+	if e.Config.OnProgress == nil && s == nil {
+		return nil
+	}
+	totMs := info.Duration.Milliseconds()
+	return func(outMs int64) {
+		e.reportProgress(ytgo.Progress{
+			VideoID: info.ID,
+			Title:   info.Title,
+			Phase:   phase,
+			Cur:     outMs,
+			Tot:     totMs,
+		})
+		if s != nil && totMs > 0 {
+			pct := float64(outMs) / float64(totMs) * 100
+			if pct > 100 {
+				pct = 100
+			}
+			s.Suffix = fmt.Sprintf("  %s (%.1f%%)", label, pct)
+		}
+	}
+}
+
 // NewEngine builds an Engine with default YouTube support.
 func NewEngine(cfg config.DownloadOptions) *Engine {
 	tp := transport.NewTunedTransport()
@@ -352,6 +380,7 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 			mergeSpinner = newStatusSpinner("Merging video and audio...")
 			mergeSpinner.Start()
 		}
+		merger.Progress = e.ffmpegProgress(info, ytgo.PhaseMerge, "Merging video and audio", mergeSpinner)
 		merged, err := merger.Run(ctx, downloaded, outputPath, e.Config.MergeOutputFormat)
 		if mergeSpinner != nil {
 			mergeSpinner.Stop()
@@ -375,10 +404,9 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 	}
 
 	// Audio extraction happens after merge/embed decisions.
-	// Note: When using -x with a single audio format, some advanced
-	// behaviors (resume identity on the converter stage, certain progress
-	// aggregation) are intentionally reduced compared to normal downloads.
-	// The core download still uses the full segmented + resume machinery.
+	// Note: the converter stage has no resume identity, unlike the core
+	// download (which uses the full segmented + resume machinery). Progress is
+	// reported via ffmpeg's -progress output against the known media duration.
 	if e.Config.ExtractAudio {
 		conv := e.makeConverter(info)
 		var convertSpinner *spinner.Spinner
@@ -386,6 +414,7 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 			convertSpinner = newStatusSpinner("Extracting audio...")
 			convertSpinner.Start()
 		}
+		conv.Progress = e.ffmpegProgress(info, ytgo.PhaseAudio, "Extracting audio", convertSpinner)
 		converted, err := conv.ExtractAudio(ctx, finalPath, e.Config.AudioFormat, e.Config.AudioQuality)
 		if convertSpinner != nil {
 			convertSpinner.Stop()

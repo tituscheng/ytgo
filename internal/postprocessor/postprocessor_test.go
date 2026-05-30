@@ -13,6 +13,23 @@ import (
 	"github.com/tituscheng/ytgo/internal/extractor"
 )
 
+func TestProgressParser(t *testing.T) {
+	var got []int64
+	p := &progressParser{cb: func(ms int64) { got = append(got, ms) }}
+
+	// Split a typical -progress block across two writes, including a partial
+	// line, to exercise cross-write buffering.
+	_, _ = p.Write([]byte("frame=10\nout_time_us=1500000\nspeed=2x\nout_time_us=30000"))
+	_, _ = p.Write([]byte("00\nprogress=continue\n"))
+
+	require.Equal(t, []int64{1500, 3000}, got)
+
+	// Non-numeric / unrelated keys are ignored, no panic.
+	got = nil
+	_, _ = p.Write([]byte("out_time_us=N/A\nbitrate=128k\n"))
+	require.Empty(t, got)
+}
+
 func TestFindFFmpeg(t *testing.T) {
 	// Test with empty preferred path
 	path := findFFmpeg("")

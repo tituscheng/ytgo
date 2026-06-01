@@ -405,9 +405,17 @@ type WriteOptions struct {
 	OnError func(lang string, err error, retryable bool)
 }
 
+// ErrNoTrack indicates the requested language has no subtitle track available.
+// It is reported through opts.OnError for visibility but is deliberately kept
+// out of the error returned by WriteSubs: a missing language is an expected
+// absence, not a failure, so it must not fail an otherwise complete download.
+var ErrNoTrack = errors.New("no track available")
+
 // WriteSubs downloads and writes subtitle files for the requested languages.
-// Per-language failures are reported via opts.OnError (if set) and accumulated
-// in the returned error. Languages with no available track are also reported.
+// Real per-language failures (fetch/convert/write) are reported via opts.OnError
+// (if set) and accumulated in the returned error. Languages with no available
+// track are reported via opts.OnError as [ErrNoTrack] but never contribute to
+// the returned error.
 func WriteSubs(ctx context.Context, info *ytgo.VideoInfo, opts WriteOptions) ([]string, error) {
 	d := NewDownloader(opts.Client)
 	d.Logger = opts.Logger
@@ -421,10 +429,14 @@ func WriteSubs(ctx context.Context, info *ytgo.VideoInfo, opts WriteOptions) ([]
 	var errs []error
 
 	report := func(lang string, err error) {
-		retryable := IsRetryable(err)
-		errs = append(errs, fmt.Errorf("subtitle %s: %w", lang, err))
 		if opts.OnError != nil {
-			opts.OnError(lang, err, retryable)
+			opts.OnError(lang, err, IsRetryable(err))
+		}
+		// A missing track is an expected absence, not a failure, so keep
+		// ErrNoTrack out of the aggregated error. Doing so lets a video
+		// without captions in the requested language still download cleanly.
+		if !errors.Is(err, ErrNoTrack) {
+			errs = append(errs, fmt.Errorf("subtitle %s: %w", lang, err))
 		}
 	}
 
@@ -433,7 +445,7 @@ func WriteSubs(ctx context.Context, info *ytgo.VideoInfo, opts WriteOptions) ([]
 
 		track, isAuto, ok := selectTrack(info, lang, opts.WriteAuto)
 		if !ok {
-			report(lang, errors.New("no track available"))
+			report(lang, ErrNoTrack)
 			continue
 		}
 

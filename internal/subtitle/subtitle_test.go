@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -282,19 +281,23 @@ func TestParseRetryAfter(t *testing.T) {
 func TestWriteSubsReportsMissingLang(t *testing.T) {
 	info := fakeInfo(nil, nil)
 	var reported []string
+	var reportedErr error
 	written, err := WriteSubs(context.Background(), info, WriteOptions{
 		Langs:    []string{"en"},
 		Format:   "srt",
 		BasePath: t.TempDir(),
 		BaseName: "video",
-		OnError: func(lang string, _ error, _ bool) {
+		OnError: func(lang string, ferr error, _ bool) {
 			reported = append(reported, lang)
+			reportedErr = ferr
 		},
 	})
-	require.Error(t, err)
+	// A missing track is reported for visibility but must NOT fail the call,
+	// so a video without captions still downloads cleanly.
+	require.NoError(t, err)
 	assert.Empty(t, written)
 	assert.Equal(t, []string{"en"}, reported)
-	assert.True(t, strings.Contains(err.Error(), "no track available"))
+	assert.ErrorIs(t, reportedErr, ErrNoTrack)
 }
 
 func fakeInfo(subs, auto map[string][]extractor.Subtitle) *ytgo.VideoInfo {

@@ -975,6 +975,13 @@ func (e *Engine) writeSubtitles(ctx context.Context, info *extractor.VideoInfo) 
 		Client:    client,
 		Logger:    e.Config.Logger,
 		OnError: func(lang string, ferr error, retryable bool) {
+			// A missing track is an expected absence, not a failure: log it
+			// for visibility but keep it out of the failure report.
+			if errors.Is(ferr, subtitle.ErrNoTrack) {
+				e.log("no subtitle track for requested language",
+					slog.String("video_id", info.ID), slog.String("lang", lang))
+				return
+			}
 			e.reportFailure(ytgo.DownloadFailure{
 				VideoID:   info.ID,
 				Title:     info.Title,

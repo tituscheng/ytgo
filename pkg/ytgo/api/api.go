@@ -8,7 +8,8 @@ import (
 
 	"github.com/tituscheng/ytgo/internal/config"
 	"github.com/tituscheng/ytgo/internal/core"
-	"github.com/tituscheng/ytgo/internal/extractor/youtube"
+	"github.com/tituscheng/ytgo/internal/extractor"
+	"github.com/tituscheng/ytgo/internal/extractors"
 	"github.com/tituscheng/ytgo/internal/format"
 	"github.com/tituscheng/ytgo/pkg/ytgo"
 )
@@ -24,7 +25,9 @@ func DefaultOptions() DownloadOptions {
 // Download extracts and downloads a single URL.
 func Download(ctx context.Context, url string, opts DownloadOptions) error {
 	engine := core.NewEngine(opts)
-	engine.Register(youtube.NewExtractor(opts.SocketTimeout))
+	for _, ext := range extractors.Default(opts.SocketTimeout, opts.EnrichMetadata) {
+		engine.Register(ext)
+	}
 	_, err := engine.Run(ctx, url)
 	return err
 }
@@ -39,8 +42,10 @@ type ExtractOptions struct {
 // Extract extracts metadata without downloading.
 // Use ExtractOptions.Enrich to enable secondary API calls for richer metadata.
 func Extract(ctx context.Context, opts ExtractOptions) (*ytgo.VideoInfo, error) {
-	ext := youtube.NewExtractor(opts.Timeout)
-	ext.Enrich = opts.Enrich
+	ext := findExtractor(opts.URL, opts.Timeout, opts.Enrich)
+	if ext == nil {
+		return nil, fmt.Errorf("no extractor found for URL: %s", opts.URL)
+	}
 	return ext.Extract(ctx, opts.URL)
 }
 
@@ -83,8 +88,10 @@ func GetStreamURL(ctx context.Context, opts GetStreamOptions) (*StreamResult, er
 		opts.Timeout = 30 * time.Second
 	}
 
-	ext := youtube.NewExtractor(opts.Timeout)
-	ext.Enrich = opts.Enrich
+	ext := findExtractor(opts.URL, opts.Timeout, opts.Enrich)
+	if ext == nil {
+		return nil, fmt.Errorf("no extractor found for URL: %s", opts.URL)
+	}
 	info, err := ext.Extract(ctx, opts.URL)
 	if err != nil {
 		return nil, fmt.Errorf("extract failed: %w", err)
@@ -110,4 +117,13 @@ func GetStreamURL(ctx context.Context, opts GetStreamOptions) (*StreamResult, er
 		Format:    formats[0],
 		VideoInfo: info,
 	}, nil
+}
+
+func findExtractor(rawURL string, timeout time.Duration, enrich bool) extractor.InfoExtractor {
+	for _, ext := range extractors.Default(timeout, enrich) {
+		if ext.Suitable(rawURL) {
+			return ext
+		}
+	}
+	return nil
 }

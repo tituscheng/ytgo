@@ -38,10 +38,11 @@ import (
 
 // Engine runs the full download pipeline.
 type Engine struct {
-	Extractors []extractor.InfoExtractor
-	Downloader *downloader.Downloader
-	Config     config.DownloadOptions
-	Transport  *http.Transport
+	Extractors    []extractor.InfoExtractor
+	Downloader    *downloader.Downloader
+	Config        config.DownloadOptions
+	Transport     *http.Transport
+	extractorName string
 
 	onErrorMu    sync.Mutex
 	onProgressMu sync.Mutex
@@ -129,6 +130,7 @@ func (e *Engine) Run(ctx context.Context, rawURL string) (*ytgo.PlaylistReport, 
 	if ext == nil {
 		return nil, fmt.Errorf("no extractor found for URL: %s", rawURL)
 	}
+	e.extractorName = ext.Name()
 
 	if e.shouldEarlySkipExisting(rawURL) {
 		videoID := youtube.ExtractVideoID(rawURL)
@@ -713,7 +715,8 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.Video
 		Limiter:  e.Downloader.Limiter,
 	}
 
-	err := d.DownloadToFile(ctx, f.URL, dest)
+	var err error
+	err = e.downloadFormatURL(ctx, f, dest, d, progressCb)
 	if err != nil && isForbidden(err) {
 		if !e.Config.Quiet {
 			color.Yellow("[%s] URL expired (403), re-extracting...", info.ID)
@@ -725,8 +728,7 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.Video
 					e.log("403 recovery succeeded, retrying with fresh URL",
 						slog.String("video_id", info.ID),
 						slog.String("format_id", f.FormatID))
-					// Retry with fresh URL (same identity, so resume state is preserved)
-					return d.DownloadToFile(ctx, freshFormat.URL, dest)
+					return e.downloadFormatURL(ctx, freshFormat, dest, d, progressCb)
 				}
 			}
 			// Exact FormatID no longer present after re-extract (YouTube can rotate IDs).
@@ -738,6 +740,23 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.Video
 		}
 	}
 	return err
+}
+
+func (e *Engine) downloadFormatURL(
+	ctx context.Context,
+	f extractor.Format,
+	dest string,
+	d *downloader.Downloader,
+	progressCb downloader.ProgressFunc,
+) error {
+	if downloader.IsStreamManifest(f.URL) {
+		return (&downloader.FFmpegDownloader{
+			FFmpegPath: e.Config.FFmpegLocation,
+			Quiet:      e.Config.Quiet,
+			Progress:   progressCb,
+		}).DownloadToFile(ctx, f.URL, dest)
+	}
+	return d.DownloadToFile(ctx, f.URL, dest)
 }
 
 // isForbidden reports whether an error indicates an HTTP 403 response.
@@ -996,7 +1015,11 @@ func (e *Engine) writeSubtitles(ctx context.Context, info *extractor.VideoInfo) 
 }
 
 func (e *Engine) printFormats(info *extractor.VideoInfo) {
-	fmt.Fprintf(os.Stderr, "[youtube] %s: Available formats\n", info.ID)
+	name := e.extractorName
+	if name == "" {
+		name = "unknown"
+	}
+	fmt.Fprintf(os.Stderr, "[%s] %s: Available formats\n", name, info.ID)
 	for _, f := range info.Formats {
 		codec := f.VideoCodec
 		if f.AudioCodec != "" && codec != "" {

@@ -14,7 +14,7 @@ import (
 
 	"github.com/tituscheng/ytgo/internal/config"
 	"github.com/tituscheng/ytgo/internal/core"
-	"github.com/tituscheng/ytgo/internal/extractor/youtube"
+	"github.com/tituscheng/ytgo/internal/extractors"
 	"github.com/tituscheng/ytgo/pkg/ytgo"
 )
 
@@ -186,9 +186,9 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 
 	engine := core.NewEngine(cfg)
-	ext := youtube.NewExtractor(cfg.SocketTimeout)
-	ext.Enrich = cfg.EnrichMetadata
-	engine.Register(ext)
+	for _, ext := range extractors.Default(cfg.SocketTimeout, cfg.EnrichMetadata) {
+		engine.Register(ext)
+	}
 
 	report, runErr := engine.Run(ctx, args[0])
 

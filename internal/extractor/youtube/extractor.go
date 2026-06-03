@@ -38,16 +38,16 @@ func (e *Extractor) Name() string { return "youtube" }
 
 // Suitable reports whether the URL is a YouTube link.
 func (e *Extractor) Suitable(rawURL string) bool {
-	if videoIDRegex.MatchString(rawURL) {
-		return true
-	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return false
 	}
 	host := strings.ToLower(u.Hostname())
 	// Exact domain + proper subdomain check (prevents notyoutube.com, fakeyoutube.com, etc.).
-	return host == "youtube.com" || strings.HasSuffix(host, ".youtube.com") || host == "youtu.be"
+	if host != "youtube.com" && !strings.HasSuffix(host, ".youtube.com") && host != "youtu.be" {
+		return false
+	}
+	return videoIDRegex.MatchString(rawURL) || playlistIDRegex.MatchString(rawURL)
 }
 
 // Extract fetches metadata for the given YouTube URL.

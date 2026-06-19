@@ -21,6 +21,10 @@ const (
 	androidVRKey   = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
 	androidVRVer   = "1.65.10"
 	androidVRAgent = "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+
+	// WebUserAgent is the browser User-Agent used for WEB innertube calls and
+	// media CDN requests (googlevideo.com).
+	WebUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
 var contentPlaybackNonceAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
@@ -78,7 +82,7 @@ func webContext(visitorID string) RequestContext {
 			GL:            "US",
 			ClientName:    "WEB",
 			ClientVersion: "2.20250101",
-			UserAgent:     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+			UserAgent:     WebUserAgent,
 			TimeZone:      "UTC",
 			UTCOffset:     0,
 			VisitorData:   visitorID,

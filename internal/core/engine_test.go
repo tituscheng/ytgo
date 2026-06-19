@@ -560,3 +560,121 @@ func TestPlaylistReport(t *testing.T) {
 	assert.Equal(t, 0, report.Skipped)
 	assert.Equal(t, 3, report.Succeeded)
 }
+
+func TestResolveDownloadURL(t *testing.T) {
+	hlsURL := "https://manifest.googlevideo.com/hls/playlist.m3u8"
+	dashURL := "https://manifest.googlevideo.com/dash/playlist.mpd"
+	liveDirect := "https://rr3---sn.example.googlevideo.com/videoplayback?live=1&itag=137"
+	vodDirect := "https://rr3---sn.example.googlevideo.com/videoplayback?itag=137&clen=1000"
+
+	infoWithHLS := &ytgo.VideoInfo{
+		IsLiveContent: true,
+		Formats: []ytgo.Format{
+			{FormatID: "hls", URL: hlsURL},
+			{FormatID: "137", URL: liveDirect, HasVideo: true, Filesize: 1000},
+		},
+	}
+	infoWithDASH := &ytgo.VideoInfo{
+		IsLiveContent: true,
+		Formats: []ytgo.Format{
+			{FormatID: "dash", URL: dashURL},
+		},
+	}
+
+	tests := []struct {
+		name      string
+		info      *ytgo.VideoInfo
+		format    ytgo.Format
+		wantURL   string
+		wantFFmpeg bool
+	}{
+		{
+			name:       "manifest url",
+			info:       infoWithHLS,
+			format:     ytgo.Format{URL: hlsURL},
+			wantURL:    hlsURL,
+			wantFFmpeg: true,
+		},
+		{
+			name:       "live=1 prefers hls manifest",
+			info:       infoWithHLS,
+			format:     ytgo.Format{URL: liveDirect, HasVideo: true},
+			wantURL:    hlsURL,
+			wantFFmpeg: true,
+		},
+		{
+			name:       "live=1 without manifest uses direct url",
+			info:       &ytgo.VideoInfo{IsLiveContent: true},
+			format:     ytgo.Format{URL: liveDirect},
+			wantURL:    liveDirect,
+			wantFFmpeg: true,
+		},
+		{
+			name:       "zero-size live video prefers hls",
+			info:       infoWithHLS,
+			format:     ytgo.Format{URL: "https://example.com/no-live-param", HasVideo: true, Filesize: 0},
+			wantURL:    hlsURL,
+			wantFFmpeg: true,
+		},
+		{
+			name:       "zero-size live video falls back to dash",
+			info:       infoWithDASH,
+			format:     ytgo.Format{URL: "https://example.com/no-live-param", HasVideo: true, Filesize: 0},
+			wantURL:    dashURL,
+			wantFFmpeg: true,
+		},
+		{
+			name:       "vod direct url uses segment downloader",
+			info:       &ytgo.VideoInfo{IsLiveContent: false},
+			format:     ytgo.Format{URL: vodDirect, HasVideo: true, Filesize: 1000},
+			wantURL:    vodDirect,
+			wantFFmpeg: false,
+		},
+		{
+			name:       "live replay with known filesize uses segment downloader",
+			info:       infoWithHLS,
+			format:     ytgo.Format{URL: vodDirect, HasVideo: true, Filesize: 1000},
+			wantURL:    vodDirect,
+			wantFFmpeg: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			url, viaFFmpeg := resolveDownloadURL(tc.info, tc.format)
+			assert.Equal(t, tc.wantURL, url)
+			assert.Equal(t, tc.wantFFmpeg, viaFFmpeg)
+		})
+	}
+}
+
+func TestManifestFormat(t *testing.T) {
+	info := &ytgo.VideoInfo{
+		Formats: []ytgo.Format{
+			{FormatID: "137", URL: "https://example.com/direct"},
+			{FormatID: "dash", URL: "https://example.com/dash.mpd"},
+			{FormatID: "hls", URL: "https://example.com/hls.m3u8"},
+		},
+	}
+	require.NotNil(t, manifestFormat(info))
+	assert.Equal(t, "hls", manifestFormat(info).FormatID)
+
+	info.Formats = info.Formats[:2]
+	require.NotNil(t, manifestFormat(info))
+	assert.Equal(t, "dash", manifestFormat(info).FormatID)
+
+	info.Formats = info.Formats[:1]
+	assert.Nil(t, manifestFormat(info))
+}
+
+func TestAllFormatsLiveOrigin(t *testing.T) {
+	assert.False(t, allFormatsLiveOrigin(nil))
+	assert.False(t, allFormatsLiveOrigin([]ytgo.Format{
+		{URL: "https://example.com/videoplayback?live=1"},
+		{URL: "https://example.com/videoplayback?itag=140"},
+	}))
+	assert.True(t, allFormatsLiveOrigin([]ytgo.Format{
+		{URL: "https://example.com/videoplayback?live=1"},
+		{URL: "https://example.com/playlist.m3u8"},
+	}))
+}

@@ -121,7 +121,7 @@ For some YouTube videos, subsequent invocations cannot resume. The download hang
 
 For long livestreams, the code renumbers fragments instead of using YouTube's static `sq/N` numbering, causing resumed downloads to skip days of content silently.
 
-> **ytgo comparison:** Not directly applicable — we don't support livestreams yet. But if we add HLS/DASH support later, this is a cautionary tale: use the server's native fragment identifiers, not a local counter.
+> **ytgo comparison:** Archived live replays download via FFmpeg + HLS manifest (no native fragment resume). Active/in-progress live recording is not supported. When adding native fragment download, use the server's native fragment identifiers, not a local counter — see yt-dlp's livestream resume bugs above.
 
 ### 7. Fragmented downloads have an "all or nothing" success bar
 

@@ -122,6 +122,7 @@ func (e *Extractor) extractVideo(ctx context.Context, videoID, rawURL string) (*
 	for _, f := range resp.StreamingData.AdaptiveFormats {
 		info.Formats = append(info.Formats, mapFormat(f))
 	}
+	appendManifestFormats(info, resp)
 
 	// Subtitles / Captions
 	if resp.Captions != nil && len(resp.Captions.PlayerCaptionsTracklistRenderer.CaptionTracks) > 0 {

@@ -126,8 +126,11 @@ The YouTube extractor is a thin adapter over the custom Innertube client:
 ```
 URL ──▶ youtube.Extractor.Extract()
             ├── video URL ──▶ innertube.Client.Player() ──▶ map to VideoInfo
+            │                      └── append HLS/DASH manifest formats; set IsLiveContent
             └── playlist URL ──▶ innertube.Client.Playlist() ──▶ map to VideoInfo with Entries
 ```
+
+**Live replay support:** When Innertube returns `hlsManifestUrl` or `dashManifestUrl`, the extractor adds synthetic `hls` / `dash` formats (HLS preferred). `VideoInfo.IsLiveContent` is set from `videoDetails.isLiveContent`. The engine routes `live=1` direct URLs and zero-size live formats through FFmpeg using the HLS manifest when available; normal VOD direct URLs keep the byte-range segment downloader.
 
 **Why a custom Innertube client instead of kkdai/youtube/v2?**
 
@@ -190,15 +193,27 @@ Returns a slice of `extractor.Format` to download. The engine downloads each for
 
 ### 6. Download Layer (`internal/downloader/`)
 
-**Files:** `downloader.go`, `segment.go`, `planner.go`, `resume.go`
+**Files:** `downloader.go`, `segment.go`, `planner.go`, `resume.go`, `ffmpeg.go`
 
-A segmented HTTP downloader with **resume support**, **bounded chunk sizes**, and optional **concurrent segment fetching**.
+A segmented HTTP downloader with **resume support**, **bounded chunk sizes**, optional **concurrent segment fetching**, and an **FFmpeg adaptive path** for HLS/DASH manifests.
 
 ```go
 d := downloader.New()
 d.Progress = func(down, total int64) { /* update spinner */ }
 err := d.DownloadToFile(ctx, url, "/path/to/video.mp4")
 ```
+
+The engine chooses between the segment downloader and `FFmpegDownloader` in `downloadFormatURL`:
+
+| Condition | Path |
+|---|---|
+| URL is `.m3u8` / `.mpd` | FFmpeg (`-user_agent` + `-c copy`) |
+| YouTube live replay: `live=1` in URL | FFmpeg via HLS manifest (fallback: direct URL) |
+| YouTube live replay: zero-size video format | FFmpeg via HLS/DASH manifest |
+| Segment download fails on live content | FFmpeg fallback to HLS/DASH manifest |
+| Otherwise | Byte-range `SegmentDownloader` |
+
+Media CDN requests use a browser User-Agent injected via `transport.WithHeaders` in `NewEngine`. Innertube API calls use separate client UAs.
 
 **Progress reporting:** The downloader's low-level `Progress func(down, total int64)` reports bytes for one stream. The engine translates these into structured `ytgo.Progress` events (one per `FormatID`, all sharing the video's `VideoID`) and forwards them through the serialized `Engine.reportProgress`. Per-video aggregation across formats is left to the consumer; ffmpeg merge/audio phases report through the same path using `-progress pipe:1` output measured against the media duration.
 

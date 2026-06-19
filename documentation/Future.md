@@ -60,12 +60,15 @@ YouTube age-restricted and members-only videos require authentication cookies. T
 ## 2. Add Concurrent Fragment Downloader for HLS/DASH Streams
 
 ### Problem
-DASH (MPD) and HLS (M3U8) manifests split video into small fragments (~2–10s). Our current `downloader.Downloader` fetches a single URL. Adaptive formats with manifest URLs (`DASHManifestURL`, `HLSManifestURL`) are not downloadable.
+DASH (MPD) and HLS (M3U8) manifests split video into small fragments (~2–10s). A native Go fragment downloader would enable concurrent fragment fetch, resume at fragment granularity, and tighter progress integration.
 
 ### Current State
-- `downloader/downloader.go` supports single-file HTTP download with resume
-- `Format` has `ManifestURL` field but it is unused
-- `ConcurrentFragments` flag exists but is ignored
+- **YouTube live replays:** HLS/DASH manifests are exposed as `hls` / `dash` formats; downloads go through FFmpeg (`FFmpegDownloader`) with browser User-Agent. Direct VOD URLs still use the segment downloader.
+- **Rumble / Cloudflare Stream:** Same FFmpeg path for `.m3u8` / `.mpd` format URLs.
+- `downloader/downloader.go` supports single-file HTTP download with resume for direct URLs
+- `Format.ManifestURL` is populated for manifest formats but routing keys off `Format.URL`
+- `ConcurrentFragments` applies to byte-range segments, not HLS/DASH fragments
+- FFmpeg adaptive downloads have no segment-level resume yet
 
 ### Proposed Approach
 

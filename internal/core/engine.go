@@ -26,6 +26,7 @@ import (
 	"github.com/tituscheng/ytgo/internal/downloader"
 	"github.com/tituscheng/ytgo/internal/extractor"
 	"github.com/tituscheng/ytgo/internal/extractor/youtube"
+	"github.com/tituscheng/ytgo/internal/extractor/youtube/innertube"
 	"github.com/tituscheng/ytgo/internal/format"
 	"github.com/tituscheng/ytgo/internal/limiter"
 	"github.com/tituscheng/ytgo/internal/pipeline"
@@ -41,7 +42,7 @@ type Engine struct {
 	Extractors    []extractor.InfoExtractor
 	Downloader    *downloader.Downloader
 	Config        config.DownloadOptions
-	Transport     *http.Transport
+	Transport     http.RoundTripper
 	extractorName string
 
 	onErrorMu    sync.Mutex
@@ -90,18 +91,21 @@ func (e *Engine) ffmpegProgress(info *extractor.VideoInfo, phase ytgo.Phase, lab
 
 // NewEngine builds an Engine with default YouTube support.
 func NewEngine(cfg config.DownloadOptions) *Engine {
-	tp := transport.NewTunedTransport()
+	baseTP := transport.NewTunedTransport()
+	mediaRT := transport.WithHeaders(baseTP, map[string]string{
+		"User-Agent": innertube.WebUserAgent,
+	})
 
 	eng := &Engine{
 		Extractors: []extractor.InfoExtractor{},
 		Downloader: &downloader.Downloader{
-			Client:     &http.Client{Transport: tp, Timeout: 0},
+			Client:     &http.Client{Transport: mediaRT, Timeout: 0},
 			BufferPool: &sync.Pool{New: func() any { return make([]byte, 32*1024) }},
 			Workers:    cfg.ConcurrentFragments,
 			Limiter:    limiter.NewGlobalLimiter(cfg.LimitRate),
 		},
 		Config:    cfg,
-		Transport: tp,
+		Transport: mediaRT,
 	}
 
 	if cfg.LimitRate > 0 {
@@ -253,6 +257,10 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 		color.Cyan("Selected %d format(s)", len(selected))
 		for _, f := range selected {
 			fmt.Fprintf(os.Stderr, "  %s: %dx%d %s/%s\n", f.FormatID, f.Width, f.Height, f.VideoCodec, f.AudioCodec)
+		}
+		if info.IsLiveContent && allFormatsLiveOrigin(selected) {
+			e.log("live replay: selected formats use live-origin URLs; FFmpeg manifest routing may apply",
+				slog.String("video_id", info.ID))
 		}
 	}
 
@@ -716,7 +724,7 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.Video
 	}
 
 	var err error
-	err = e.downloadFormatURL(ctx, f, dest, d, progressCb)
+	err = e.downloadFormatURL(ctx, info, f, dest, d, progressCb)
 	if err != nil && isForbidden(err) {
 		if !e.Config.Quiet {
 			color.Yellow("[%s] URL expired (403), re-extracting...", info.ID)
@@ -728,7 +736,7 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.Video
 					e.log("403 recovery succeeded, retrying with fresh URL",
 						slog.String("video_id", info.ID),
 						slog.String("format_id", f.FormatID))
-					return e.downloadFormatURL(ctx, freshFormat, dest, d, progressCb)
+					return e.downloadFormatURL(ctx, fresh, freshFormat, dest, d, progressCb)
 				}
 			}
 			// Exact FormatID no longer present after re-extract (YouTube can rotate IDs).
@@ -744,19 +752,77 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.Video
 
 func (e *Engine) downloadFormatURL(
 	ctx context.Context,
+	info *extractor.VideoInfo,
 	f extractor.Format,
 	dest string,
 	d *downloader.Downloader,
 	progressCb downloader.ProgressFunc,
 ) error {
-	if downloader.IsStreamManifest(f.URL) {
-		return (&downloader.FFmpegDownloader{
-			FFmpegPath: e.Config.FFmpegLocation,
-			Quiet:      e.Config.Quiet,
-			Progress:   progressCb,
-		}).DownloadToFile(ctx, f.URL, dest)
+	url, viaFFmpeg := resolveDownloadURL(info, f)
+	if viaFFmpeg {
+		return e.ffmpegDownloader(progressCb).DownloadToFile(ctx, url, dest)
 	}
-	return d.DownloadToFile(ctx, f.URL, dest)
+
+	err := d.DownloadToFile(ctx, url, dest)
+	if err != nil && info.IsLiveContent {
+		if fallback := manifestFormat(info); fallback != nil {
+			return e.ffmpegDownloader(progressCb).DownloadToFile(ctx, fallback.URL, dest)
+		}
+	}
+	return err
+}
+
+func (e *Engine) ffmpegDownloader(progressCb downloader.ProgressFunc) *downloader.FFmpegDownloader {
+	return &downloader.FFmpegDownloader{
+		FFmpegPath: e.Config.FFmpegLocation,
+		Quiet:      e.Config.Quiet,
+		Progress:   progressCb,
+		UserAgent:  innertube.WebUserAgent,
+	}
+}
+
+func manifestFormat(info *extractor.VideoInfo) *extractor.Format {
+	for i := range info.Formats {
+		if info.Formats[i].FormatID == "hls" {
+			return &info.Formats[i]
+		}
+	}
+	for i := range info.Formats {
+		if info.Formats[i].FormatID == "dash" {
+			return &info.Formats[i]
+		}
+	}
+	return nil
+}
+
+func resolveDownloadURL(info *extractor.VideoInfo, f extractor.Format) (string, bool) {
+	if downloader.IsStreamManifest(f.URL) {
+		return f.URL, true
+	}
+	if strings.Contains(f.URL, "live=1") {
+		if m := manifestFormat(info); m != nil {
+			return m.URL, true
+		}
+		return f.URL, true
+	}
+	if info.IsLiveContent && f.Filesize == 0 && f.HasVideo {
+		if m := manifestFormat(info); m != nil {
+			return m.URL, true
+		}
+	}
+	return f.URL, false
+}
+
+func allFormatsLiveOrigin(formats []extractor.Format) bool {
+	if len(formats) == 0 {
+		return false
+	}
+	for _, f := range formats {
+		if !strings.Contains(f.URL, "live=1") && !downloader.IsStreamManifest(f.URL) {
+			return false
+		}
+	}
+	return true
 }
 
 // isForbidden reports whether an error indicates an HTTP 403 response.

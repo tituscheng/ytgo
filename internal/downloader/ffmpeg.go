@@ -20,6 +20,7 @@ type FFmpegDownloader struct {
 	FFmpegPath string
 	Quiet      bool
 	Progress   ProgressFunc
+	UserAgent  string
 }
 
 // DownloadToFile writes the stream at url to destPath using ffmpeg.
@@ -33,20 +34,7 @@ func (fd *FFmpegDownloader) DownloadToFile(ctx context.Context, url, destPath st
 		return fmt.Errorf("create output directory: %w", err)
 	}
 
-	args := []string{
-		"-hide_banner",
-		"-loglevel", ffmpegLogLevel(fd.Quiet),
-		"-y",
-		"-i", url,
-		"-c", "copy",
-	}
-	if strings.Contains(strings.ToLower(url), ".m3u8") {
-		args = append(args, "-bsf:a", "aac_adtstoasc")
-	}
-	if format := outputFormat(destPath); format != "" {
-		args = append(args, "-f", format)
-	}
-	args = append(args, destPath)
+	args := fd.buildArgs(url, destPath)
 
 	cmd := exec.CommandContext(ctx, ffmpeg, args...)
 	if fd.Quiet {
@@ -61,6 +49,26 @@ func (fd *FFmpegDownloader) DownloadToFile(ctx context.Context, url, destPath st
 		return fmt.Errorf("ffmpeg stream download: %w", err)
 	}
 	return nil
+}
+
+func (fd *FFmpegDownloader) buildArgs(url, destPath string) []string {
+	args := []string{
+		"-hide_banner",
+		"-loglevel", ffmpegLogLevel(fd.Quiet),
+		"-y",
+	}
+	if fd.UserAgent != "" {
+		args = append(args, "-user_agent", fd.UserAgent)
+	}
+	args = append(args, "-i", url, "-c", "copy")
+	if strings.Contains(strings.ToLower(url), ".m3u8") {
+		args = append(args, "-bsf:a", "aac_adtstoasc")
+	}
+	if format := outputFormat(destPath); format != "" {
+		args = append(args, "-f", format)
+	}
+	args = append(args, destPath)
+	return args
 }
 
 func (fd *FFmpegDownloader) ffmpegPath() string {

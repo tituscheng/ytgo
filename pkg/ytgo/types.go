@@ -66,6 +66,7 @@ type VideoInfo struct {
 	LikeCount   int64         `json:"like_count,omitempty"`
 	WebpageURL  string        `json:"webpage_url,omitempty"`
 	OriginalURL string        `json:"original_url,omitempty"`
+	IsLiveContent bool        `json:"is_live_content,omitempty"`
 
 	Formats       []Format              `json:"formats"`
 	Thumbnails    []Thumbnail           `json:"thumbnails,omitempty"`

@@ -5,6 +5,7 @@ import (
 
 	"github.com/tituscheng/ytgo/internal/extractor"
 	"github.com/tituscheng/ytgo/internal/extractor/cloudflarestream"
+	"github.com/tituscheng/ytgo/internal/extractor/dailymotion"
 	"github.com/tituscheng/ytgo/internal/extractor/rumble"
 	"github.com/tituscheng/ytgo/internal/extractor/youtube"
 )
@@ -16,6 +17,7 @@ func Default(timeout time.Duration, enrich bool) []extractor.InfoExtractor {
 	return []extractor.InfoExtractor{
 		rumble.NewExtractor(timeout),
 		cloudflarestream.NewExtractor(timeout),
+		dailymotion.NewExtractor(timeout),
 		yt,
 	}
 }

@@ -1,6 +1,6 @@
 # ytgo
 
-A **Go** rewrite of [yt-dlp](https://github.com/yt-dlp/yt-dlp) focused on **YouTube**, **Rumble**, and **Cloudflare Stream**.
+A **Go** rewrite of [yt-dlp](https://github.com/yt-dlp/yt-dlp) focused on **YouTube**, **Rumble**, **Dailymotion**, and **Cloudflare Stream**.
 Designed as both a standalone CLI tool and a reusable Go library.
 
 ---
@@ -21,7 +21,7 @@ Designed as both a standalone CLI tool and a reusable Go library.
 
 ytgo uses a custom **YouTube Innertube client** with the `ANDROID_VR` client profile — it gets direct stream URLs with no JavaScript execution and no signature deciphering. Downloads use **bounded 10 MB chunk segmentation** to bypass YouTube CDN throttling, achieving full bandwidth speeds (~20+ MB/s) even on formats that would otherwise drop to ~32 KB/s. The `WEB_EMBEDDED_PLAYER` client provides fallback for age-restricted content.
 
-If you need sponsorblock, 1000+ site extractors, or `--cookies-from-browser`, yt-dlp is still the tool for the job. ytgo is for when you want a fast, light, Go-native downloader for YouTube, Rumble, and Cloudflare Stream.
+If you need sponsorblock, 1000+ site extractors, or `--cookies-from-browser`, yt-dlp is still the tool for the job. ytgo is for when you want a fast, light, Go-native downloader for YouTube, Rumble, Dailymotion, and Cloudflare Stream.
 
 ---
 
@@ -29,6 +29,7 @@ If you need sponsorblock, 1000+ site extractors, or `--cookies-from-browser`, yt
 
 - **YouTube video & playlist extraction** via a custom Innertube client (no JS engine)
 - **Rumble extraction** — embed and video page URLs via the public embedJS API; direct MP4/WebM downloads plus HLS for live streams
+- **Dailymotion extraction** — video URLs via a single player-metadata API call; direct MP4 via HTTP, HLS fallback via FFmpeg
 - **Cloudflare Stream extraction** — direct URLs, embed JS links, customer subdomains, HLS variants, DASH fallback, optional direct MP4, and subtitle tracks from the master playlist
 - **Format selection** with yt-dlp-style selectors (`bv*+ba/best`, `best[height<=720]`, `hls-720p`, itag, extension)
 - **Format preferences** — type-safe codec/container scoring (`PreferVideoCodec: "avc1"`) instead of regex DSL
@@ -121,6 +122,10 @@ go build -o ytgo .
 # Rumble — embed or video page URL
 ./ytgo -f mp4-720p "https://rumble.com/embed/v5pv5f"
 ./ytgo "https://rumble.com/vslug-title.html"
+
+# Dailymotion — short or video page URL
+./ytgo --list-formats "https://www.dailymotion.com/video/x5kesuj"
+./ytgo -f http-720 "https://dai.ly/x5kesuj"
 ```
 
 ---
@@ -371,8 +376,9 @@ sub-langs:
 | Package | Purpose |
 |---|---|
 | `internal/extractor` | `InfoExtractor` interface |
-| `internal/extractors` | Built-in extractor registry (Rumble, Cloudflare Stream, YouTube) |
+| `internal/extractors` | Built-in extractor registry (Rumble, Cloudflare Stream, Dailymotion, YouTube) |
 | `internal/extractor/rumble` | Rumble embedJS client, page URL resolution, format parsing |
+| `internal/extractor/dailymotion` | Dailymotion player-metadata client, URL parsing, format parsing |
 | `internal/extractor/youtube` | YouTube extractor wrapping the custom Innertube client; exposes HLS/DASH manifests for live replays |
 | `internal/extractor/youtube/innertube` | Direct YouTube Innertube API client (ANDROID_VR / WEB_EMBEDDED_PLAYER) |
 | `internal/extractor/cloudflarestream` | Cloudflare Stream URL parsing, HLS/DASH format extraction |
@@ -463,6 +469,7 @@ info, err := api.Extract(ctx, api.ExtractOptions{
 |---|---|---|
 | YouTube | `youtube` | Videos, Shorts, playlists; direct HTTP with segment resume; archived live replays via HLS/FFmpeg (`-f hls`) |
 | Rumble | `rumble` | Embed and `rumble.com/v…html` page URLs; MP4/WebM via HTTP, live HLS via FFmpeg |
+| Dailymotion | `dailymotion` | `dai.ly`, `/video/`, embed, crawler, and geo player URLs; progressive MP4 via HTTP, HLS via FFmpeg |
 | Cloudflare Stream | `cloudflarestream` | `cloudflarestream.com`, `videodelivery.net`, embed JS URLs, customer subdomains; HLS/DASH via FFmpeg |
 
 Cloudflare Stream URLs must be direct links to the stream (watch page, embed JS, manifest URL). ytgo does not yet scrape Cloudflare embeds from arbitrary third-party pages the way yt-dlp's generic extractor can.
@@ -475,7 +482,7 @@ ytgo is intentionally lean. Things yt-dlp does that ytgo does **not** yet suppor
 
 - **SponsorBlock** — no chapter-based ad skipping
 - **Cookies from browser** — browser cookie extraction was never wired; the `--cookies-from-browser` (and related networking) flags have been removed. Cookie file support via the library API remains available for authenticated scenarios.
-- **Most other sites** — only YouTube, Rumble, and Cloudflare Stream today (the `InfoExtractor` interface is ready for more)
+- **Most other sites** — only YouTube, Rumble, Dailymotion, and Cloudflare Stream today (the `InfoExtractor` interface is ready for more)
 - **Channel/playlist pages** — Rumble channels and search/browse pages are not supported yet
 - **Cloudflare embed detection** — no generic webpage scraping for embedded Stream players
 - **Adaptive download resume** — segment-level resume applies to direct HTTP downloads (YouTube VOD); HLS/DASH downloads (YouTube live replays, Rumble, Cloudflare Stream) use FFmpeg and do not yet share the same resume/progress integration

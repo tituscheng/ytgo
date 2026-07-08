@@ -27,7 +27,7 @@ type metadataResponse struct {
 	Thumbnails map[string]string `json:"thumbnails"`
 	Qualities  map[string][]qualityEntry `json:"qualities"`
 	Subtitles  struct {
-		Data map[string]subtitleEntry `json:"data"`
+		Data json.RawMessage `json:"data"`
 	} `json:"subtitles"`
 	Error *metadataError `json:"error"`
 }
@@ -38,7 +38,8 @@ type qualityEntry struct {
 }
 
 type subtitleEntry struct {
-	URLs []string `json:"urls"`
+	URLs     []string `json:"urls"`
+	Language string   `json:"language"`
 }
 
 type metadataError struct {

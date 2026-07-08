@@ -1,6 +1,7 @@
 package dailymotion
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -97,11 +98,45 @@ func qualityLabel(height int) string {
 }
 
 func parseSubtitles(metadata *metadataResponse) map[string][]extractor.Subtitle {
-	if len(metadata.Subtitles.Data) == 0 {
+	raw := metadata.Subtitles.Data
+	if len(raw) == 0 || string(raw) == "null" {
 		return nil
 	}
+
+	var byLang map[string]subtitleEntry
+	if err := json.Unmarshal(raw, &byLang); err == nil && len(byLang) > 0 {
+		return subtitlesFromEntries(byLang)
+	}
+
+	var entries []subtitleEntry
+	if err := json.Unmarshal(raw, &entries); err != nil || len(entries) == 0 {
+		return nil
+	}
+	flat := make(map[string]subtitleEntry, len(entries))
+	for i, entry := range entries {
+		key := entry.Language
+		if key == "" {
+			key = strconv.Itoa(i)
+		}
+		flat[key] = entry
+	}
+	return subtitlesFromEntries(flat)
+}
+
+func subtitlesFromEntries(entries map[string]subtitleEntry) map[string][]extractor.Subtitle {
 	subs := make(map[string][]extractor.Subtitle)
-	for lang, entry := range metadata.Subtitles.Data {
+	for key, entry := range entries {
+		lang := entry.Language
+		if lang == "" {
+			lang = key
+		}
+		if lang == "" {
+			lang = "und"
+		}
+		name := entry.Language
+		if name == "" {
+			name = lang
+		}
 		for _, subURL := range entry.URLs {
 			if subURL == "" {
 				continue
@@ -110,7 +145,7 @@ func parseSubtitles(metadata *metadataResponse) map[string][]extractor.Subtitle 
 				URL:      subURL,
 				Ext:      "vtt",
 				Language: lang,
-				Name:     lang,
+				Name:     name,
 			})
 		}
 	}

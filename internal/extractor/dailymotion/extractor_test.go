@@ -165,16 +165,60 @@ func TestParseFormats(t *testing.T) {
 }
 
 func TestParseSubtitles(t *testing.T) {
-	metadata := &metadataResponse{}
-	metadata.Subtitles.Data = map[string]subtitleEntry{
+	raw, err := json.Marshal(map[string]subtitleEntry{
 		"en": {URLs: []string{"https://cdn.example/sub-en.vtt"}},
 		"fr": {URLs: []string{"https://cdn.example/sub-fr.vtt"}},
-	}
+	})
+	require.NoError(t, err)
+
+	metadata := &metadataResponse{}
+	metadata.Subtitles.Data = raw
 
 	subs := parseSubtitles(metadata)
 	require.Len(t, subs, 2)
 	assert.Equal(t, "https://cdn.example/sub-en.vtt", subs["en"][0].URL)
 	assert.Equal(t, "vtt", subs["en"][0].Ext)
+}
+
+func TestParseSubtitlesEmptyArray(t *testing.T) {
+	metadata := &metadataResponse{}
+	metadata.Subtitles.Data = json.RawMessage(`[]`)
+
+	subs := parseSubtitles(metadata)
+	assert.Nil(t, subs)
+}
+
+func TestExtractWithEmptySubtitlesArray(t *testing.T) {
+	const metadataJSON = `{
+		"title":"enough of playing nice chinese drama",
+		"duration":120,
+		"created_time":1493651285,
+		"owner":{"id":"x1xm8ri","screenname":"Channel"},
+		"qualities":{
+			"auto":[{"url":"https://cdndirector.dailymotion.com/cdn/video/xaks7ja/video/H264-854x480.mp4?sec=abc"}]
+		},
+		"subtitles":{"data":[]}
+	}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/player/metadata/video/xaks7ja") {
+			_, _ = w.Write([]byte(metadataJSON))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	ext := &Extractor{
+		client:       srv.Client(),
+		metadataBase: srv.URL + "/player/metadata/video/",
+	}
+
+	info, err := ext.Extract(context.Background(), "https://www.dailymotion.com/video/xaks7ja")
+	require.NoError(t, err)
+	assert.Equal(t, "xaks7ja", info.ID)
+	assert.Nil(t, info.Subtitles)
+	require.Len(t, info.Formats, 1)
 }
 
 func TestParseThumbnails(t *testing.T) {
@@ -266,7 +310,8 @@ func TestMetadataResponseUnmarshal(t *testing.T) {
 		"duration":187,
 		"created_time":1493651285,
 		"owner":{"id":"x1xm8ri","screenname":"Deadline"},
-		"qualities":{"720":[{"url":"https://cdn.example/720.mp4"}]}
+		"qualities":{"720":[{"url":"https://cdn.example/720.mp4"}]},
+		"subtitles":{"data":[]}
 	}`
 	var metadata metadataResponse
 	require.NoError(t, json.Unmarshal([]byte(raw), &metadata))

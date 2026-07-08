@@ -24,6 +24,24 @@ func TestFFmpegDownloader_buildArgs_UserAgent(t *testing.T) {
 	assert.Contains(t, args, "aac_adtstoasc")
 }
 
+func TestFFmpegDownloader_buildArgs_Headers(t *testing.T) {
+	fd := &FFmpegDownloader{
+		Quiet: true,
+		Headers: map[string]string{
+			"Origin":     "https://www.dailymotion.com",
+			"User-Agent": "Mozilla/5.0 Test",
+		},
+	}
+	args := fd.buildArgs("https://cdndirector.dailymotion.com/video.m3u8", "/tmp/out.mp4")
+
+	assert.Contains(t, args, "-headers")
+	idx := indexOf(args, "-headers")
+	require.GreaterOrEqual(t, idx, 0)
+	assert.Contains(t, args[idx+1], "Origin: https://www.dailymotion.com")
+	assert.Contains(t, args[idx+1], "User-Agent: Mozilla/5.0 Test")
+	assert.NotContains(t, args, "-user_agent")
+}
+
 func TestFFmpegDownloader_buildArgs_NoUserAgent(t *testing.T) {
 	fd := &FFmpegDownloader{Quiet: true}
 	args := fd.buildArgs("https://example.com/video.mpd", "/tmp/out.mkv")
@@ -31,6 +49,19 @@ func TestFFmpegDownloader_buildArgs_NoUserAgent(t *testing.T) {
 	assert.NotContains(t, args, "-user_agent")
 	assert.Contains(t, args, "-f")
 	assert.Contains(t, args, "mkv")
+}
+
+func TestFFmpegDownloader_DownloadToFile_QuietCapturesStderr(t *testing.T) {
+	fd := &FFmpegDownloader{
+		Quiet:  true,
+		Headers: map[string]string{
+			"Origin":     "https://www.dailymotion.com",
+			"User-Agent": "Mozilla/5.0 Test",
+		},
+	}
+	err := fd.DownloadToFile(t.Context(), "https://invalid.example/notreal.m3u8", t.TempDir()+"/out.mp4")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ffmpeg stream download")
 }
 
 func indexOf(slice []string, target string) int {

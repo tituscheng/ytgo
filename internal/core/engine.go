@@ -760,25 +760,38 @@ func (e *Engine) downloadFormatURL(
 ) error {
 	url, viaFFmpeg := resolveDownloadURL(info, f)
 	if viaFFmpeg {
-		return e.ffmpegDownloader(progressCb).DownloadToFile(ctx, url, dest)
+		return e.ffmpegDownloader(progressCb, ffmpegDownloadHeaders(info, url)).DownloadToFile(ctx, url, dest)
 	}
 
 	err := d.DownloadToFile(ctx, url, dest)
 	if err != nil && info.IsLiveContent {
 		if fallback := manifestFormat(info); fallback != nil {
-			return e.ffmpegDownloader(progressCb).DownloadToFile(ctx, fallback.URL, dest)
+			return e.ffmpegDownloader(progressCb, ffmpegDownloadHeaders(info, fallback.URL)).DownloadToFile(ctx, fallback.URL, dest)
 		}
 	}
 	return err
 }
 
-func (e *Engine) ffmpegDownloader(progressCb downloader.ProgressFunc) *downloader.FFmpegDownloader {
+func (e *Engine) ffmpegDownloader(progressCb downloader.ProgressFunc, headers map[string]string) *downloader.FFmpegDownloader {
 	return &downloader.FFmpegDownloader{
 		FFmpegPath: e.Config.FFmpegLocation,
 		Quiet:      e.Config.Quiet,
 		Progress:   progressCb,
 		UserAgent:  innertube.WebUserAgent,
+		Headers:    headers,
 	}
+}
+
+func ffmpegDownloadHeaders(info *extractor.VideoInfo, url string) map[string]string {
+	if strings.Contains(url, "dailymotion.com") ||
+		strings.Contains(info.WebpageURL, "dailymotion.com") ||
+		strings.Contains(info.OriginalURL, "dailymotion.com") {
+		return map[string]string{
+			"Origin":     "https://www.dailymotion.com",
+			"User-Agent": innertube.WebUserAgent,
+		}
+	}
+	return nil
 }
 
 func manifestFormat(info *extractor.VideoInfo) *extractor.Format {

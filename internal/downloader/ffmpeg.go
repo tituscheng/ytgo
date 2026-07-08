@@ -1,6 +1,7 @@
 package downloader
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -21,6 +22,7 @@ type FFmpegDownloader struct {
 	Quiet      bool
 	Progress   ProgressFunc
 	UserAgent  string
+	Headers    map[string]string
 }
 
 // DownloadToFile writes the stream at url to destPath using ffmpeg.
@@ -37,15 +39,19 @@ func (fd *FFmpegDownloader) DownloadToFile(ctx context.Context, url, destPath st
 	args := fd.buildArgs(url, destPath)
 
 	cmd := exec.CommandContext(ctx, ffmpeg, args...)
+	var stderr bytes.Buffer
 	if fd.Quiet {
 		cmd.Stdout = nil
-		cmd.Stderr = nil
+		cmd.Stderr = &stderr
 	} else {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 	}
 
 	if err := cmd.Run(); err != nil {
+		if fd.Quiet && stderr.Len() > 0 {
+			return fmt.Errorf("ffmpeg stream download: %w: %s", err, strings.TrimSpace(stderr.String()))
+		}
 		return fmt.Errorf("ffmpeg stream download: %w", err)
 	}
 	return nil
@@ -57,7 +63,10 @@ func (fd *FFmpegDownloader) buildArgs(url, destPath string) []string {
 		"-loglevel", ffmpegLogLevel(fd.Quiet),
 		"-y",
 	}
-	if fd.UserAgent != "" {
+	if len(fd.Headers) > 0 {
+		args = append(args, "-headers", formatFFmpegHeaders(fd.Headers))
+	}
+	if fd.UserAgent != "" && fd.Headers["User-Agent"] == "" {
 		args = append(args, "-user_agent", fd.UserAgent)
 	}
 	args = append(args, "-i", url, "-c", "copy")
@@ -81,6 +90,17 @@ func (fd *FFmpegDownloader) ffmpegPath() string {
 		return p
 	}
 	return ""
+}
+
+func formatFFmpegHeaders(headers map[string]string) string {
+	var b strings.Builder
+	for k, v := range headers {
+		b.WriteString(k)
+		b.WriteString(": ")
+		b.WriteString(v)
+		b.WriteString("\r\n")
+	}
+	return b.String()
 }
 
 func ffmpegLogLevel(quiet bool) string {

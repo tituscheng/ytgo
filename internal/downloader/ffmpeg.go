@@ -69,6 +69,16 @@ func (fd *FFmpegDownloader) buildArgs(url, destPath string) []string {
 	if fd.UserAgent != "" && fd.Headers["User-Agent"] == "" {
 		args = append(args, "-user_agent", fd.UserAgent)
 	}
+	// HLS smart defaults (independent of -N / ConcurrentFragments):
+	// reuse TCP connections and allow FFmpeg multi-connection segment fetch.
+	// True N-way fragment concurrency still requires a native HLS downloader.
+	// Avoid -reconnect* here: it can hang indefinitely on unreachable hosts.
+	if strings.Contains(strings.ToLower(url), ".m3u8") {
+		args = append(args,
+			"-http_persistent", "1",
+			"-http_multiple", "1",
+		)
+	}
 	args = append(args, "-i", url, "-c", "copy")
 	if strings.Contains(strings.ToLower(url), ".m3u8") {
 		args = append(args, "-bsf:a", "aac_adtstoasc")

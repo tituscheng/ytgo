@@ -43,7 +43,9 @@ func (e *Extractor) Extract(ctx context.Context, rawURL string) (*extractor.Vide
 		return nil, err
 	}
 
+	duration := time.Duration(metadata.Duration) * time.Second
 	formats := parseFormats(metadata)
+	formats = expandHLSFormats(ctx, e.client, formats, duration)
 	if len(formats) == 0 {
 		return nil, fmt.Errorf("no downloadable formats found for Dailymotion video %s", videoID)
 	}
@@ -56,7 +58,7 @@ func (e *Extractor) Extract(ctx context.Context, rawURL string) (*extractor.Vide
 		UploaderID:  metadata.Owner.ID,
 		Channel:     metadata.Owner.Screenname,
 		UploadDate:  parseUploadDate(metadata.CreatedTime),
-		Duration:    time.Duration(metadata.Duration) * time.Second,
+		Duration:    duration,
 		OriginalURL: rawURL,
 		WebpageURL:  fmt.Sprintf("https://www.dailymotion.com/video/%s", videoID),
 		Formats:     formats,

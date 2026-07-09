@@ -105,7 +105,7 @@ func init() {
 	rootCmd.Flags().Duration("socket-timeout", cfg.SocketTimeout, "Network timeout")
 
 	// Fragment download
-	rootCmd.Flags().IntP("concurrent-fragments", "N", cfg.ConcurrentFragments, "Number of fragment download threads")
+	rootCmd.Flags().IntP("concurrent-fragments", "N", cfg.ConcurrentFragments, "Concurrency: HTTP range workers (default 1). For HLS, <=1 uses smart default (~12 fragment workers); -N >1 sets fixed HLS workers")
 
 	// Concurrency limits
 	rootCmd.Flags().Int("max-downloads", cfg.MaxDownloads, "Maximum concurrent video downloads")

@@ -122,6 +122,23 @@ func selectSingle(selector string, formats []extractor.Format, prefs Preferences
 func selectPlain(selector string, formats []extractor.Format, prefs Preferences) ([]extractor.Format, error) {
 	switch strings.ToLower(selector) {
 	case "best", "b":
+		// Prefer a single combined stream when available. For demuxed-only
+		// sources (e.g. Dailymotion HLS with separate audio groups), fall back
+		// to best video + best audio so "best" is not silent video.
+		if !hasCombinedAV(formats) {
+			v := bestVideo(formats, nil, prefs)
+			a := bestAudio(formats, nil, prefs)
+			if v != nil && a != nil && v.FormatID != a.FormatID {
+				return []extractor.Format{*v, *a}, nil
+			}
+			if v != nil {
+				return []extractor.Format{*v}, nil
+			}
+			if a != nil {
+				return []extractor.Format{*a}, nil
+			}
+			return nil, fmt.Errorf("no best format")
+		}
 		f := best(formats, nil, prefs)
 		if f == nil {
 			return nil, fmt.Errorf("no best format")
@@ -319,6 +336,15 @@ func worstAudio(formats []extractor.Format, pred predicate, prefs Preferences) *
 		}
 	}
 	return worst(out, pred, prefs)
+}
+
+func hasCombinedAV(formats []extractor.Format) bool {
+	for _, f := range formats {
+		if f.HasVideo && f.HasAudio {
+			return true
+		}
+	}
+	return false
 }
 
 // score returns a heuristic quality score. Higher is better.

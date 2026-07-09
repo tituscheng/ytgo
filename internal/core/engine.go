@@ -24,6 +24,7 @@ import (
 	"github.com/tituscheng/ytgo/internal/cleanup"
 	"github.com/tituscheng/ytgo/internal/config"
 	"github.com/tituscheng/ytgo/internal/downloader"
+	"github.com/tituscheng/ytgo/internal/downloader/hlsfrag"
 	"github.com/tituscheng/ytgo/internal/extractor"
 	"github.com/tituscheng/ytgo/internal/extractor/youtube"
 	"github.com/tituscheng/ytgo/internal/extractor/youtube/innertube"
@@ -758,8 +759,20 @@ func (e *Engine) downloadFormatURL(
 	d *downloader.Downloader,
 	progressCb downloader.ProgressFunc,
 ) error {
-	url, viaFFmpeg := resolveDownloadURL(info, f)
-	if viaFFmpeg {
+	url, isManifest := resolveDownloadURL(info, f)
+	if isManifest {
+		// Prefer native concurrent HLS for VOD media playlists (e.g. Dailymotion
+		// fMP4). Fall back to FFmpeg for masters, live, encrypted, or errors.
+		if strings.Contains(strings.ToLower(url), ".m3u8") && !info.IsLiveContent {
+			if err := e.hlsFragDownload(ctx, info, url, dest, progressCb); err == nil {
+				return nil
+			} else {
+				e.log("native HLS download failed, falling back to ffmpeg",
+					slog.String("video_id", info.ID),
+					slog.String("format_id", f.FormatID),
+					slog.String("error", err.Error()))
+			}
+		}
 		return e.ffmpegDownloader(progressCb, ffmpegDownloadHeaders(info, url)).DownloadToFile(ctx, url, dest)
 	}
 
@@ -770,6 +783,44 @@ func (e *Engine) downloadFormatURL(
 		}
 	}
 	return err
+}
+
+// hlsFragDownload fetches a media playlist with concurrent fragment workers.
+// ConcurrentFragments <= 1 enables smart default workers (hlsfrag.DefaultWorkers);
+// values > 1 are treated as an explicit user choice.
+func (e *Engine) hlsFragDownload(
+	ctx context.Context,
+	info *extractor.VideoInfo,
+	playlistURL, dest string,
+	progressCb downloader.ProgressFunc,
+) error {
+	headers := ffmpegDownloadHeaders(info, playlistURL)
+	if headers == nil {
+		headers = map[string]string{}
+	}
+	if headers["User-Agent"] == "" {
+		headers["User-Agent"] = innertube.WebUserAgent
+	}
+	// Dailymotion (and some CDNs) reject HTTP/2 on playlist/segment edges.
+	forceH1 := strings.Contains(playlistURL, "dailymotion.com") ||
+		strings.Contains(playlistURL, "dmcdn.net") ||
+		strings.Contains(info.WebpageURL, "dailymotion.com") ||
+		strings.Contains(info.OriginalURL, "dailymotion.com")
+
+	workers := hlsfrag.ResolveWorkers(e.Config.ConcurrentFragments)
+	e.log("native HLS fragment download",
+		slog.String("video_id", info.ID),
+		slog.Int("workers", workers),
+		slog.Bool("force_http1", forceH1))
+
+	hd := &hlsfrag.Downloader{
+		Client:     e.Downloader.Client,
+		Workers:    workers,
+		Headers:    headers,
+		ForceHTTP1: forceH1,
+		Progress:   hlsfrag.ProgressFunc(progressCb),
+	}
+	return hd.DownloadToFile(ctx, playlistURL, dest)
 }
 
 func (e *Engine) ffmpegDownloader(progressCb downloader.ProgressFunc, headers map[string]string) *downloader.FFmpegDownloader {
@@ -784,10 +835,12 @@ func (e *Engine) ffmpegDownloader(progressCb downloader.ProgressFunc, headers ma
 
 func ffmpegDownloadHeaders(info *extractor.VideoInfo, url string) map[string]string {
 	if strings.Contains(url, "dailymotion.com") ||
+		strings.Contains(url, "dmcdn.net") ||
 		strings.Contains(info.WebpageURL, "dailymotion.com") ||
 		strings.Contains(info.OriginalURL, "dailymotion.com") {
 		return map[string]string{
 			"Origin":     "https://www.dailymotion.com",
+			"Referer":    "https://www.dailymotion.com/",
 			"User-Agent": innertube.WebUserAgent,
 		}
 	}
@@ -1106,8 +1159,12 @@ func (e *Engine) printFormats(info *extractor.VideoInfo) {
 		} else if f.AudioCodec != "" {
 			codec = f.AudioCodec
 		}
+		size := f.Filesize
+		if size <= 0 {
+			size = f.FilesizeApprox
+		}
 		fmt.Fprintf(os.Stderr, "%-5s %-10s %-6s %dx%d %s ~%s\n",
-			f.FormatID, f.Ext, f.QualityLabel, f.Width, f.Height, codec, humanSize(f.Filesize))
+			f.FormatID, f.Ext, f.QualityLabel, f.Width, f.Height, codec, humanSize(size))
 	}
 }
 

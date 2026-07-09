@@ -29,7 +29,8 @@ If you need sponsorblock, 1000+ site extractors, or `--cookies-from-browser`, yt
 
 - **YouTube video & playlist extraction** via a custom Innertube client (no JS engine)
 - **Rumble extraction** — embed and video page URLs via the public embedJS API; direct MP4/WebM downloads plus HLS for live streams
-- **Dailymotion extraction** — video URLs via a single player-metadata API call; direct MP4 via HTTP, HLS fallback via FFmpeg
+- **Dailymotion extraction** — player-metadata API; progressive MP4 via HTTP; HLS masters expanded into per-quality + demuxed audio; **native concurrent fMP4 fragment download** (smart multi-connection defaults, FFmpeg fallback)
+- **Native HLS fragments** — VOD media playlists (fMP4 init + segments) download via Go workers instead of FFmpeg when possible
 - **Cloudflare Stream extraction** — direct URLs, embed JS links, customer subdomains, HLS variants, DASH fallback, optional direct MP4, and subtitle tracks from the master playlist
 - **Format selection** with yt-dlp-style selectors (`bv*+ba/best`, `best[height<=720]`, `hls-720p`, itag, extension)
 - **Format preferences** — type-safe codec/container scoring (`PreferVideoCodec: "avc1"`) instead of regex DSL
@@ -469,7 +470,7 @@ info, err := api.Extract(ctx, api.ExtractOptions{
 |---|---|---|
 | YouTube | `youtube` | Videos, Shorts, playlists; direct HTTP with segment resume; archived live replays via HLS/FFmpeg (`-f hls`) |
 | Rumble | `rumble` | Embed and `rumble.com/v…html` page URLs; MP4/WebM via HTTP, live HLS via FFmpeg |
-| Dailymotion | `dailymotion` | `dai.ly`, `/video/`, embed, crawler, and geo player URLs; progressive MP4 via HTTP, HLS via FFmpeg |
+| Dailymotion | `dailymotion` | `dai.ly`, `/video/`, embed, crawler, and geo player URLs; progressive MP4 via HTTP; HLS master expanded; native concurrent fMP4 fragment download (FFmpeg fallback) |
 | Cloudflare Stream | `cloudflarestream` | `cloudflarestream.com`, `videodelivery.net`, embed JS URLs, customer subdomains; HLS/DASH via FFmpeg |
 
 Cloudflare Stream URLs must be direct links to the stream (watch page, embed JS, manifest URL). ytgo does not yet scrape Cloudflare embeds from arbitrary third-party pages the way yt-dlp's generic extractor can.

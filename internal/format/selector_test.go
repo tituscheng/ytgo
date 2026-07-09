@@ -214,3 +214,25 @@ func TestSelectBackwardCompat(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "2", result[0].FormatID)
 }
+
+func TestSelectBestDemuxedOnly(t *testing.T) {
+	// Dailymotion-style demuxed HLS: no combined A/V format.
+	formats := []extractor.Format{
+		{FormatID: "hls-380", Height: 640, HasVideo: true, HasAudio: false, TBR: 460},
+		{FormatID: "hls-480", Height: 848, HasVideo: true, HasAudio: false, TBR: 836},
+		{FormatID: "hls-aac-q1", ABR: 64, HasVideo: false, HasAudio: true},
+		{FormatID: "hls-aac-q2", ABR: 128, HasVideo: false, HasAudio: true},
+	}
+	result, err := Select("best", formats)
+	require.NoError(t, err)
+	require.Len(t, result, 2)
+	assert.Equal(t, "hls-480", result[0].FormatID)
+	assert.Equal(t, "hls-aac-q2", result[1].FormatID)
+
+	// Default selector path.
+	result, err = Select("bv*+ba/best", formats)
+	require.NoError(t, err)
+	require.Len(t, result, 2)
+	assert.Equal(t, "hls-480", result[0].FormatID)
+	assert.Equal(t, "hls-aac-q2", result[1].FormatID)
+}

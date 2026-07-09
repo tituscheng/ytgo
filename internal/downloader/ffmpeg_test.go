@@ -22,6 +22,18 @@ func TestFFmpegDownloader_buildArgs_UserAgent(t *testing.T) {
 	assert.Contains(t, args, "https://example.com/playlist.m3u8")
 	assert.Contains(t, args, "-bsf:a")
 	assert.Contains(t, args, "aac_adtstoasc")
+	// HLS smart defaults (independent of -N).
+	assert.Contains(t, args, "-http_persistent")
+	assert.Contains(t, args, "-http_multiple")
+	assert.Equal(t, "1", args[indexOf(args, "-http_persistent")+1])
+	assert.Equal(t, "1", args[indexOf(args, "-http_multiple")+1])
+}
+
+func TestFFmpegDownloader_buildArgs_NonHLS_NoSmartOpts(t *testing.T) {
+	fd := &FFmpegDownloader{Quiet: true}
+	args := fd.buildArgs("https://example.com/video.mpd", "/tmp/out.mkv")
+	assert.NotContains(t, args, "-http_multiple")
+	assert.NotContains(t, args, "-http_persistent")
 }
 
 func TestFFmpegDownloader_buildArgs_Headers(t *testing.T) {

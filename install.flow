@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# install.flow — install ytgo from this repo (equivalent to: go install .)
+set -euo pipefail
+cd "$(cd "$(dirname "$0")" && pwd)"
+exec go install .

@@ -34,16 +34,23 @@ func TestParseMediaPlaylist_fMP4(t *testing.T) {
 	assert.Equal(t, 2, pl.Fragments[2].Index)
 }
 
-func TestParseMediaPlaylist_MasterRejected(t *testing.T) {
+func TestParseMediaPlaylist_MasterVariants(t *testing.T) {
 	const doc = `#EXTM3U
-#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",URI="audio.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,AUDIO="aac"
 stream_360.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=1400000,RESOLUTION=1280x720
+#EXT-X-STREAM-INF:BANDWIDTH=1400000,RESOLUTION=1280x720,AUDIO="aac"
 stream_720.m3u8
 `
 	pl, err := ParseMediaPlaylist(strings.NewReader(doc), "https://cdn.example/master.m3u8")
-	require.Error(t, err)
-	assert.True(t, pl == nil || pl.IsMaster)
+	require.NoError(t, err)
+	assert.True(t, pl.IsMaster)
+	require.Len(t, pl.Variants, 2)
+	best := pl.BestVariant()
+	require.NotNil(t, best)
+	assert.Equal(t, 1400000, best.Bandwidth)
+	assert.Equal(t, "https://cdn.example/stream_720.m3u8", best.URL)
+	assert.Equal(t, "https://cdn.example/audio.m3u8", pl.AudioGroups["aac"])
 }
 
 func TestParseMediaPlaylist_Encrypted(t *testing.T) {

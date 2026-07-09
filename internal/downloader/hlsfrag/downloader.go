@@ -65,7 +65,16 @@ func (d *Downloader) DownloadToFile(ctx context.Context, playlistURL, destPath s
 		retries = 3
 	}
 
-	plBody, err := d.get(ctx, client, playlistURL)
+	return d.downloadPlaylist(ctx, client, playlistURL, destPath, workers, retries, 0)
+}
+
+func (d *Downloader) downloadPlaylist(
+	ctx context.Context,
+	client *http.Client,
+	playlistURL, destPath string,
+	workers, retries, depth int,
+) error {
+	plBody, err := d.getWithRetry(ctx, client, playlistURL, retries)
 	if err != nil {
 		return fmt.Errorf("fetch playlist: %w", err)
 	}
@@ -73,8 +82,18 @@ func (d *Downloader) DownloadToFile(ctx context.Context, playlistURL, destPath s
 	if err != nil {
 		return err
 	}
+	// Multivariant master: follow the best STREAM-INF media playlist once.
+	// Demuxed audio (EXT-X-MEDIA) is not muxed here — extract-time expand is
+	// preferred for full A/V; this recovers video when expansion failed.
 	if pl.IsMaster {
-		return fmt.Errorf("master playlist not supported by hlsfrag (need media playlist)")
+		if depth > 0 {
+			return fmt.Errorf("nested master playlist not supported")
+		}
+		v := pl.BestVariant()
+		if v == nil || v.URL == "" {
+			return fmt.Errorf("master playlist has no usable variants")
+		}
+		return d.downloadPlaylist(ctx, client, v.URL, destPath, workers, retries, depth+1)
 	}
 	if pl.Encrypted {
 		return fmt.Errorf("encrypted HLS not supported by hlsfrag")

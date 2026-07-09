@@ -766,6 +766,9 @@ func (e *Engine) downloadFormatURL(
 		if strings.Contains(strings.ToLower(url), ".m3u8") && !info.IsLiveContent {
 			if err := e.hlsFragDownload(ctx, info, url, dest, progressCb); err == nil {
 				return nil
+			} else if ctx.Err() != nil {
+				// Don't fall back to FFmpeg after user cancel / deadline.
+				return err
 			} else {
 				e.log("native HLS download failed, falling back to ffmpeg",
 					slog.String("video_id", info.ID),

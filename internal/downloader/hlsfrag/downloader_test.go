@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -72,7 +71,36 @@ c.m4s
 	assert.Equal(t, int64(len(data)), lastTot)
 }
 
-func TestDownloadToFile_RejectsMaster(t *testing.T) {
+func TestDownloadToFile_FollowsMasterToMedia(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/master.m3u8", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1000
+media.m3u8
+`))
+	})
+	mux.HandleFunc("/media.m3u8", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`#EXTM3U
+#EXTINF:1.0,
+seg.m4s
+#EXT-X-ENDLIST
+`))
+	})
+	mux.HandleFunc("/seg.m4s", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("SEGDATA"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dest := filepath.Join(t.TempDir(), "o.mp4")
+	d := &Downloader{Client: srv.Client(), Workers: 2}
+	require.NoError(t, d.DownloadToFile(context.Background(), srv.URL+"/master.m3u8", dest))
+	data, err := os.ReadFile(dest)
+	require.NoError(t, err)
+	assert.Equal(t, "SEGDATA", string(data))
+}
+
+func TestDownloadToFile_NestedMasterErrors(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`#EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=1000
@@ -84,7 +112,7 @@ v.m3u8
 	d := &Downloader{Client: srv.Client(), Workers: 2}
 	err := d.DownloadToFile(context.Background(), srv.URL, filepath.Join(t.TempDir(), "o.mp4"))
 	require.Error(t, err)
-	assert.True(t, strings.Contains(err.Error(), "master") || strings.Contains(err.Error(), "media playlist"))
+	assert.Contains(t, err.Error(), "nested master")
 }
 
 func TestDownloadToFile_RetryTransient(t *testing.T) {

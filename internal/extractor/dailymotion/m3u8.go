@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -76,34 +77,106 @@ func isHLSFormat(f extractor.Format) bool {
 }
 
 func fetchMasterFormats(ctx context.Context, client *http.Client, masterURL string, duration time.Duration) ([]extractor.Format, error) {
+	// CDN director intermittently returns 403 (header fingerprint / rate).
+	// Retry with HTTP/1.1 + yt-dlp-style randomized "blockbuster" headers.
+	httpClient := masterFetchClient(client)
+	const maxAttempts = 6
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			delay := time.Duration(150*(1<<(attempt-1))) * time.Millisecond
+			if delay > 2*time.Second {
+				delay = 2 * time.Second
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+		body, err := fetchMasterBody(ctx, httpClient, masterURL, attempt)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		result, err := parseMasterPlaylist(strings.NewReader(string(body)), masterURL)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		applyFilesizeApprox(result.formats, duration)
+		return result.formats, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("fetch HLS master: exhausted retries")
+	}
+	return nil, lastErr
+}
+
+func fetchMasterBody(ctx context.Context, client *http.Client, masterURL string, attempt int) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, masterURL, nil)
 	if err != nil {
 		return nil, err
 	}
+	applyMasterHeaders(req, attempt)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch HLS master: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch HLS master: HTTP %d", resp.StatusCode)
+	}
+	return body, nil
+}
+
+// applyMasterHeaders sets browser-like headers. Later attempts add randomized
+// junk headers (yt-dlp "blockbuster") and drop Cookie, which the CDN sometimes
+// rejects as a fingerprint match.
+func applyMasterHeaders(req *http.Request, attempt int) {
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Origin", "https://www.dailymotion.com")
 	req.Header.Set("Referer", "https://www.dailymotion.com/")
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("Cookie", "ff=off")
+	// Cookie helps family-filter metadata; omit on retries after the first
+	// couple attempts when we hit intermittent 403s.
+	if attempt < 2 {
+		req.Header.Set("Cookie", "ff=off")
+	}
+	if attempt > 0 {
+		for k, v := range blockbusterHeaders() {
+			req.Header.Set(k, v)
+		}
+	}
+}
 
-	// Dailymotion's CDN director often returns 403 on HTTP/2; force HTTP/1.1.
-	resp, err := masterFetchClient(client).Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetch HLS master: %w", err)
+// blockbusterHeaders mirrors yt-dlp's randomized header fingerprint for DM 403s:
+// https://github.com/yt-dlp/yt-dlp/issues/15526
+func blockbusterHeaders() map[string]string {
+	const consonants = "bcdfghjklmnpqrstvwxz"
+	randLetters := func(minN, maxN int) string {
+		n := minN
+		if maxN > minN {
+			n += rand.Intn(maxN - minN + 1)
+		}
+		var b strings.Builder
+		for i := 0; i < n; i++ {
+			b.WriteByte(consonants[rand.Intn(len(consonants))])
+		}
+		return b.String()
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return nil, fmt.Errorf("fetch HLS master: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	n := 2 + rand.Intn(7)
+	out := make(map[string]string, n)
+	for i := 0; i < n; i++ {
+		out[randLetters(8, 24)] = randLetters(16, 32)
 	}
-
-	result, err := parseMasterPlaylist(resp.Body, masterURL)
-	if err != nil {
-		return nil, err
-	}
-	applyFilesizeApprox(result.formats, duration)
-	return result.formats, nil
+	return out
 }
 
 // masterFetchClient returns an HTTP/1.1 client. The CDN director used for

@@ -25,6 +25,16 @@ type Fragment struct {
 	IsInit bool
 }
 
+// Variant is one STREAM-INF entry from a multivariant (master) playlist.
+type Variant struct {
+	URL       string
+	Bandwidth int
+	Width     int
+	Height    int
+	// AudioGroup is the EXT-X-MEDIA GROUP-ID referenced by AUDIO="...".
+	AudioGroup string
+}
+
 // Playlist is a parsed media (not master) HLS playlist.
 type Playlist struct {
 	// Fragments is init (optional) followed by media segments, in write order.
@@ -37,6 +47,10 @@ type Playlist struct {
 	Encrypted bool
 	// IsMaster is true when the document looks like a multivariant playlist.
 	IsMaster bool
+	// Variants is populated for master playlists (STREAM-INF entries).
+	Variants []Variant
+	// AudioGroups maps GROUP-ID → media playlist URL for TYPE=AUDIO.
+	AudioGroups map[string]string
 }
 
 // ParseMediaPlaylist parses an HLS media playlist. Relative URIs are resolved
@@ -47,11 +61,14 @@ func ParseMediaPlaylist(r io.Reader, baseURL string) (*Playlist, error) {
 		return nil, fmt.Errorf("parse base URL: %w", err)
 	}
 
-	pl := &Playlist{}
+	pl := &Playlist{
+		AudioGroups: make(map[string]string),
+	}
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
 
 	var pendingMapURI string
+	var pendingVariant *Variant
 	index := 0
 
 	for scanner.Scan() {
@@ -63,6 +80,30 @@ func ParseMediaPlaylist(r io.Reader, baseURL string) (*Playlist, error) {
 		switch {
 		case strings.HasPrefix(line, "#EXT-X-STREAM-INF:"):
 			pl.IsMaster = true
+			attrs := parseAttrs(strings.TrimPrefix(line, "#EXT-X-STREAM-INF:"))
+			v := Variant{AudioGroup: attrs["AUDIO"]}
+			if n, err := strconv.Atoi(attrs["BANDWIDTH"]); err == nil {
+				v.Bandwidth = n
+			}
+			if res := attrs["RESOLUTION"]; res != "" {
+				parts := strings.Split(res, "x")
+				if len(parts) == 2 {
+					v.Width, _ = strconv.Atoi(parts[0])
+					v.Height, _ = strconv.Atoi(parts[1])
+				}
+			}
+			pendingVariant = &v
+		case strings.HasPrefix(line, "#EXT-X-MEDIA:"):
+			attrs := parseAttrs(strings.TrimPrefix(line, "#EXT-X-MEDIA:"))
+			if strings.EqualFold(attrs["TYPE"], "AUDIO") && attrs["URI"] != "" && attrs["GROUP-ID"] != "" {
+				abs, err := resolve(base, stripFragment(attrs["URI"]))
+				if err != nil {
+					return nil, err
+				}
+				if _, exists := pl.AudioGroups[attrs["GROUP-ID"]]; !exists {
+					pl.AudioGroups[attrs["GROUP-ID"]] = abs
+				}
+			}
 		case strings.HasPrefix(line, "#EXT-X-ENDLIST"):
 			pl.HasEndList = true
 		case strings.HasPrefix(line, "#EXT-X-TARGETDURATION:"):
@@ -93,8 +134,17 @@ func ParseMediaPlaylist(r io.Reader, baseURL string) (*Playlist, error) {
 			// other tags ignored
 		default:
 			// URI line
+			if pendingVariant != nil {
+				abs, err := resolve(base, stripFragment(line))
+				if err != nil {
+					return nil, err
+				}
+				pendingVariant.URL = abs
+				pl.Variants = append(pl.Variants, *pendingVariant)
+				pendingVariant = nil
+				continue
+			}
 			if pl.IsMaster {
-				// Master variant URI — not a media segment for our purposes.
 				continue
 			}
 			abs, err := resolve(base, stripFragment(line))
@@ -112,13 +162,30 @@ func ParseMediaPlaylist(r io.Reader, baseURL string) (*Playlist, error) {
 		return nil, err
 	}
 
-	if pl.IsMaster && len(pl.Fragments) == 0 {
-		return pl, fmt.Errorf("master playlist (not a media playlist)")
+	if pl.IsMaster {
+		if len(pl.Variants) == 0 {
+			return pl, fmt.Errorf("master playlist with no variants")
+		}
+		return pl, nil
 	}
 	if len(pl.Fragments) == 0 {
 		return nil, fmt.Errorf("no media segments in playlist")
 	}
 	return pl, nil
+}
+
+// BestVariant returns the highest-bandwidth variant, or nil.
+func (pl *Playlist) BestVariant() *Variant {
+	if pl == nil || len(pl.Variants) == 0 {
+		return nil
+	}
+	best := &pl.Variants[0]
+	for i := range pl.Variants {
+		if pl.Variants[i].Bandwidth > best.Bandwidth {
+			best = &pl.Variants[i]
+		}
+	}
+	return best
 }
 
 func resolve(base *url.URL, ref string) (string, error) {

@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -41,12 +40,20 @@ type Downloader struct {
 	MaxRetries int
 	// ForceHTTP1 disables HTTP/2 (required for some Dailymotion CDN edges).
 	ForceHTTP1 bool
+	// Continue enables resume from a .hlsfrags sidecar (default true when zero-value
+	// is treated as true only if explicitly set; callers should set Continue: true).
+	// When false, any partial file and sidecar are discarded.
+	Continue bool
 }
 
 // DownloadToFile downloads the media playlist at playlistURL into destPath.
 // Output is a raw concatenation of init + media segments (valid fMP4 for
 // Dailymotion-style playlists). Master playlists and encrypted/live streams
 // return an error so callers can fall back to FFmpeg.
+//
+// Memory is bounded by a sliding fetch window (≈ 2×Workers completed-but-not-
+// yet-written fragments). Partial progress is saved to destPath+".hlsfrags"
+// so interrupted downloads can resume.
 func (d *Downloader) DownloadToFile(ctx context.Context, playlistURL, destPath string) error {
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
 		return fmt.Errorf("create output directory: %w", err)
@@ -105,13 +112,72 @@ func (d *Downloader) downloadPlaylist(
 		return fmt.Errorf("empty media playlist")
 	}
 
-	fd, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	start, bytesWritten, err := d.resolveResume(playlistURL, destPath, pl.Fragments)
+	if err != nil {
+		return err
+	}
+	if start >= len(pl.Fragments) {
+		// Already complete from a prior run.
+		removeResumeState(destPath)
+		if d.Progress != nil {
+			d.Progress(bytesWritten, bytesWritten)
+		}
+		return nil
+	}
+
+	flag := os.O_CREATE | os.O_WRONLY
+	if start == 0 {
+		flag |= os.O_TRUNC
+	}
+	fd, err := os.OpenFile(destPath, flag, 0o644)
 	if err != nil {
 		return fmt.Errorf("open dest: %w", err)
 	}
 	defer fd.Close()
 
-	return d.downloadFragments(ctx, client, pl.Fragments, fd, workers, retries)
+	if start > 0 {
+		if err := fd.Truncate(bytesWritten); err != nil {
+			return fmt.Errorf("truncate partial: %w", err)
+		}
+		if _, err := fd.Seek(bytesWritten, io.SeekStart); err != nil {
+			return fmt.Errorf("seek partial: %w", err)
+		}
+	}
+
+	return d.downloadFragments(ctx, client, pl.Fragments, fd, destPath, playlistURL, start, bytesWritten, workers, retries)
+}
+
+// resolveResume returns the fragment index and byte offset to continue from.
+func (d *Downloader) resolveResume(playlistURL, destPath string, frags []Fragment) (start int, bytesWritten int64, err error) {
+	if !d.Continue {
+		removeResumeState(destPath)
+		return 0, 0, nil
+	}
+	st, loadErr := loadResumeState(destPath)
+	if loadErr != nil {
+		// Corrupt sidecar: start fresh.
+		removeResumeState(destPath)
+		return 0, 0, nil
+	}
+	if !validateResume(st, playlistURL, frags, destPath) {
+		removeResumeState(destPath)
+		return 0, 0, nil
+	}
+	return st.NextIndex, st.BytesWritten, nil
+}
+
+func fetchWindow(workers, remaining int) int {
+	window := workers * 2
+	if window < 16 {
+		window = 16
+	}
+	if remaining > 0 && window > remaining {
+		window = remaining
+	}
+	if window < 1 {
+		window = 1
+	}
+	return window
 }
 
 func (d *Downloader) downloadFragments(
@@ -119,25 +185,30 @@ func (d *Downloader) downloadFragments(
 	client *http.Client,
 	frags []Fragment,
 	fd *os.File,
+	destPath, playlistURL string,
+	start int,
+	bytesWritten int64,
 	workers, retries int,
 ) error {
 	n := len(frags)
-	// How far ahead of the write head fetchers may run (bounds memory).
-	window := workers * 2
-	if window < 16 {
-		window = 16
-	}
-	if window > n {
-		window = n
-	}
+	remaining := n - start
+	window := fetchWindow(workers, remaining)
 
+	// Ring of window slots: index i uses slots[i%window].
+	// Sliding permits ensure at most `window` fragments are fetched ahead of
+	// the ordered write head, bounding memory.
+	//
+	// Ownership: only one fragment occupies a ring slot at a time. The fetcher
+	// fills data/err then closes done. The writer waits on done, drains the
+	// slot, installs a fresh done channel, then releases a fetch permit so the
+	// next occupant (i+window) may begin. Never replace a sync.Once under a
+	// concurrent Do — that races after close(done) while Do is still returning.
 	type slot struct {
 		data []byte
 		err  error
-		once sync.Once
 		done chan struct{}
 	}
-	slots := make([]slot, n)
+	slots := make([]slot, window)
 	for i := range slots {
 		slots[i].done = make(chan struct{})
 	}
@@ -145,16 +216,27 @@ func (d *Downloader) downloadFragments(
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Job queue: buffered by window so we never schedule more than `window`
-	// indices before the writer has caught up enough for the producer to block.
-	jobs := make(chan int, window)
+	// canFetch permits the producer to schedule the next fragment index.
+	// Initially window permits; writer releases one after each successful write.
+	canFetch := make(chan struct{}, window)
+	for i := 0; i < window; i++ {
+		canFetch <- struct{}{}
+	}
+
+	jobs := make(chan int)
 
 	var written atomic.Int64
+	written.Store(bytesWritten)
 
-	// Producer: emit fragment indices.
+	// Producer: emit fragment indices start..n-1 with sliding-window backpressure.
 	go func() {
 		defer close(jobs)
-		for i := 0; i < n; i++ {
+		for i := start; i < n; i++ {
+			select {
+			case <-ctx.Done():
+				return
+			case <-canFetch:
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -175,12 +257,13 @@ func (d *Downloader) downloadFragments(
 					if !ok {
 						return nil
 					}
+					ring := i % window
 					data, err := d.getWithRetry(gctx, client, frags[i].URL, retries)
-					slots[i].once.Do(func() {
-						slots[i].data = data
-						slots[i].err = err
-						close(slots[i].done)
-					})
+					// Publish then signal. Writer must not recycle this slot
+					// until it has observed done (and thus these stores).
+					slots[ring].data = data
+					slots[ring].err = err
+					close(slots[ring].done)
 					if err != nil {
 						cancel()
 						return fmt.Errorf("fragment %d: %w", frags[i].Index, err)
@@ -190,31 +273,71 @@ func (d *Downloader) downloadFragments(
 		})
 	}
 
-	// Ordered writer (must run concurrently with workers — not after launch).
-	for i := 0; i < n; i++ {
+	state := &ResumeState{
+		Version:       resumeVersion,
+		PlaylistURL:   playlistURL,
+		FragmentCount: n,
+		NextIndex:     start,
+		BytesWritten:  bytesWritten,
+		Fingerprint:   fragmentFingerprint(frags),
+	}
+
+	// Ordered writer.
+	for i := start; i < n; i++ {
+		ring := i % window
 		select {
 		case <-ctx.Done():
 			cancel()
 			_ = g.Wait()
 			return ctx.Err()
-		case <-slots[i].done:
+		case <-slots[ring].done:
 		}
-		if slots[i].err != nil {
+		if slots[ring].err != nil {
 			cancel()
 			_ = g.Wait()
-			return slots[i].err
+			return slots[ring].err
 		}
-		data := slots[i].data
+		data := slots[ring].data
 		if _, err := fd.Write(data); err != nil {
 			cancel()
 			_ = g.Wait()
 			return fmt.Errorf("write fragment %d: %w", i, err)
 		}
 		w := written.Add(int64(len(data)))
-		slots[i].data = nil
+		// Clear payload, install fresh done for the next occupant of this ring
+		// index, then release a fetch permit (happens-before next fill).
+		slots[ring].data = nil
+		slots[ring].err = nil
+		slots[ring].done = make(chan struct{})
+
+		state.NextIndex = i + 1
+		state.BytesWritten = w
+		// Flush sidecar periodically (and on last fragment) to bound re-download
+		// after a crash without fsyncing JSON on every tiny fMP4 segment.
+		const resumeSaveEvery = 8
+		if state.NextIndex == n || (state.NextIndex-start)%resumeSaveEvery == 0 {
+			if err := saveResumeState(destPath, state); err != nil {
+				cancel()
+				_ = g.Wait()
+				return fmt.Errorf("save resume state: %w", err)
+			}
+		}
+
+		select {
+		case canFetch <- struct{}{}:
+		default:
+			// Buffer full only if producer already exited; safe to drop.
+		}
+
 		if d.Progress != nil {
-			avg := w / int64(i+1)
-			d.Progress(w, avg*int64(n))
+			// Estimate total from average bytes per written fragment so far.
+			doneCount := int64(i - start + 1)
+			avg := (w - bytesWritten) / doneCount
+			estTotal := bytesWritten + avg*int64(remaining)
+			if estTotal < w {
+				estTotal = w
+			}
+			d.Progress(w, estTotal)
 		}
 	}
 
@@ -224,6 +347,7 @@ func (d *Downloader) downloadFragments(
 	if err := fd.Sync(); err != nil {
 		return err
 	}
+	removeResumeState(destPath)
 	if d.Progress != nil {
 		w := written.Load()
 		d.Progress(w, w)

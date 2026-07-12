@@ -821,6 +821,7 @@ func (e *Engine) hlsFragDownload(
 		Workers:    workers,
 		Headers:    headers,
 		ForceHTTP1: forceH1,
+		Continue:   e.Config.ContinuePartial,
 		Progress:   hlsfrag.ProgressFunc(progressCb),
 	}
 	return hd.DownloadToFile(ctx, playlistURL, dest)

@@ -36,6 +36,7 @@ func TestLiveDailymotionHLS380(t *testing.T) {
 	d := &Downloader{
 		Workers:    12,
 		ForceHTTP1: true,
+		Continue:   true,
 		Headers: map[string]string{
 			"Origin":     "https://www.dailymotion.com",
 			"Referer":    "https://www.dailymotion.com/",

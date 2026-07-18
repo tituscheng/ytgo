@@ -314,8 +314,8 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 		}
 		// Always rename (even in stdout mode) so that downloaded[] always points
 		// to real files. The stdout path later copies from the final temp file.
-		if err := os.Rename(partPath, finalPath); err != nil {
-			return nil, fmt.Errorf("rename part file: %w", err)
+		if err := renamePartFile(partPath, finalPath); err != nil {
+			return nil, err
 		}
 		if isStdout {
 			temps.Pop() // finalPath (now the canonical temp file)
@@ -357,8 +357,8 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 				// instead of aborting after the first CDN 504.
 				continue
 			}
-			if err := os.Rename(partPath, finalPath); err != nil {
-				return nil, fmt.Errorf("rename part file: %w", err)
+			if err := renamePartFile(partPath, finalPath); err != nil {
+				return nil, err
 			}
 			if isStdout {
 				temps.Pop()
@@ -410,8 +410,8 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 				}
 				// Always rename (even in stdout mode) so that downloaded[] always points
 				// to real files for the merger / final stdout copy.
-				if err := os.Rename(partPath, finalPath); err != nil {
-					return fmt.Errorf("rename part file: %w", err)
+				if err := renamePartFile(partPath, finalPath); err != nil {
+					return err
 				}
 				if isStdout {
 					temps.Pop()
@@ -1401,6 +1401,30 @@ func (e *Engine) cleanupFile(p string) {
 			slog.String("path", p),
 			slog.String("error", err.Error()))
 	}
+}
+
+// renamePartFile atomically promotes a successful download from *.part to its
+// final name. If the .part file is already gone but the final path exists and
+// is non-empty (e.g. crash between rename and return, or a concurrent process
+// finished first), treat that as success so retries stay idempotent.
+func renamePartFile(partPath, finalPath string) error {
+	err := os.Rename(partPath, finalPath)
+	if err == nil {
+		return nil
+	}
+
+	// Idempotent: another path already produced a non-empty final file and
+	// removed the part (crash between rename and return, or concurrent ytgo).
+	if st, ferr := os.Stat(finalPath); ferr == nil && st.Size() > 0 {
+		if _, perr := os.Stat(partPath); os.IsNotExist(perr) {
+			return nil
+		}
+	}
+
+	if _, perr := os.Stat(partPath); os.IsNotExist(perr) {
+		return fmt.Errorf("rename part file: %s: no such file or directory (download may have been removed or raced with another process)", partPath)
+	}
+	return fmt.Errorf("rename part file: %w", err)
 }
 
 // makeMerger returns a Merger, using a prefixed version when concurrent

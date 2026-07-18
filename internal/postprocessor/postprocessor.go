@@ -171,6 +171,18 @@ func (m *Merger) Run(ctx context.Context, inputs []string, outputPath, forceExt 
 	if len(inputs) < 2 {
 		return inputs[0], nil
 	}
+	for _, in := range inputs {
+		if in == "" {
+			return "", fmt.Errorf("ffmpeg merge: empty input path")
+		}
+		st, err := os.Stat(in)
+		if err != nil {
+			return "", fmt.Errorf("ffmpeg merge: input %s: %w", filepath.Base(in), err)
+		}
+		if st.Size() == 0 {
+			return "", fmt.Errorf("ffmpeg merge: input %s is empty", filepath.Base(in))
+		}
+	}
 
 	ext := filepath.Ext(outputPath)
 	if forceExt != "" {

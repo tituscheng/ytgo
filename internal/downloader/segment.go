@@ -202,6 +202,15 @@ func (sd *SegmentDownloader) DownloadToFile(ctx context.Context, url, destPath s
 	}
 
 	_ = fd.Sync()
+
+	// Preallocate sets size to totalSize even when bytes were never written.
+	// Re-check that the on-disk size matches the probe so we never hand a
+	// sparse/truncated file to the merge stage as "complete".
+	if actual := fileSize(destPath); actual != totalSize {
+		_ = rs.Save()
+		return fmt.Errorf("download size mismatch: got %d want %d bytes", actual, totalSize)
+	}
+
 	_ = rs.Remove()
 	return nil
 }
@@ -232,6 +241,11 @@ func (sd *SegmentDownloader) probe(ctx context.Context, url string) (int64, bool
 
 // fetchSegment downloads a single byte range and writes it to fd at the
 // correct offset using WriteAt.
+//
+// The full segment must be received: a short body (CDN cut-off, proxy, etc.)
+// used to return success while leaving zeros from preallocate in the hole.
+// That produced valid-looking files that later failed FFmpeg merge with
+// "moov atom not found".
 func (sd *SegmentDownloader) fetchSegment(ctx context.Context, url string, seg ByteRange, fd *os.File, downloaded *atomic.Int64) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -245,7 +259,14 @@ func (sd *SegmentDownloader) fetchSegment(ctx context.Context, url string, seg B
 	}
 
 	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
 		return &StatusError{StatusCode: resp.StatusCode, URL: url}
+	}
+	// 200 OK means the server ignored Range and sent the whole resource.
+	// Only safe when this segment is the entire file from offset 0.
+	if resp.StatusCode == http.StatusOK && (seg.StartByte != 0 || seg.Size() != sd.totalSize) {
+		resp.Body.Close()
+		return fmt.Errorf("segment %d: server ignored Range (HTTP 200 for %s)", seg.Index, seg.String())
 	}
 
 	// Apply global rate limit (if configured) to the response body.
@@ -265,17 +286,30 @@ func (sd *SegmentDownloader) fetchSegment(ctx context.Context, url string, seg B
 		buf = make([]byte, 32*1024)
 	}
 
+	want := seg.Size()
 	offset := seg.StartByte
+	var got int64
 	for {
 		n, err := body.Read(buf)
 		if n > 0 {
-			if _, werr := fd.WriteAt(buf[:n], offset); werr != nil {
-				return fmt.Errorf("writeat %d: %w", offset, werr)
+			// Never write past the planned segment end (defensive if server
+			// sends more than requested).
+			if got+int64(n) > want {
+				n = int(want - got)
 			}
-			offset += int64(n)
-			newTotal := downloaded.Add(int64(n))
-			if sd.Progress != nil {
-				sd.Progress(newTotal, sd.totalSize) // report against global file size
+			if n > 0 {
+				if _, werr := fd.WriteAt(buf[:n], offset); werr != nil {
+					return fmt.Errorf("writeat %d: %w", offset, werr)
+				}
+				offset += int64(n)
+				got += int64(n)
+				newTotal := downloaded.Add(int64(n))
+				if sd.Progress != nil {
+					sd.Progress(newTotal, sd.totalSize) // report against global file size
+				}
+			}
+			if got >= want {
+				break
 			}
 		}
 		if err == io.EOF {
@@ -284,6 +318,9 @@ func (sd *SegmentDownloader) fetchSegment(ctx context.Context, url string, seg B
 		if err != nil {
 			return fmt.Errorf("read: %w", err)
 		}
+	}
+	if got != want {
+		return fmt.Errorf("segment %d short read: got %d want %d bytes (%s)", seg.Index, got, want, seg.String())
 	}
 	return nil
 }

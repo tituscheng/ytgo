@@ -932,7 +932,29 @@ func (e *Engine) hlsFragDownload(
 		Progress:   hlsfrag.ProgressFunc(progressCb),
 		MaxRetries: maxRetries,
 	}
-	return hd.DownloadToFile(ctx, playlistURL, dest)
+	if err := hd.DownloadToFile(ctx, playlistURL, dest); err != nil {
+		return err
+	}
+	// Classic MPEG-TS HLS (e.g. some Dailymotion VODs) concatenates to a
+	// transport stream. Remux to a real MP4 when the output name promises one.
+	return e.remuxNativeHLSIfMPEGTS(ctx, dest)
+}
+
+// remuxNativeHLSIfMPEGTS turns raw TS fragment concat into a proper MP4 when
+// dest is named *.mp4 (or *.part of one). No-op for fMP4 native downloads.
+func (e *Engine) remuxNativeHLSIfMPEGTS(ctx context.Context, dest string) error {
+	if !downloader.IsMPEGTSFile(dest) {
+		return nil
+	}
+	if !e.Config.Quiet {
+		printTagged(color.New(color.FgCyan), tagInfo, "Remuxing MPEG-TS → MP4…")
+	}
+	e.log("remuxing native HLS MPEG-TS to MP4",
+		slog.String("dest", dest))
+	if err := downloader.RemuxMPEGTSToMP4(ctx, e.Config.FFmpegLocation, dest); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (e *Engine) ffmpegDownloader(progressCb downloader.ProgressFunc, headers map[string]string) *downloader.FFmpegDownloader {

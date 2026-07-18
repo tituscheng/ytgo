@@ -188,6 +188,35 @@ func (pl *Playlist) BestVariant() *Variant {
 	return best
 }
 
+// IsMPEGTS reports whether this media playlist looks like classic MPEG-TS HLS
+// (no EXT-X-MAP init, media URIs are .ts). fMP4 playlists (MAP + .m4s) return false.
+// Concatenating such playlists yields a transport stream, not an MP4 file.
+func (pl *Playlist) IsMPEGTS() bool {
+	if pl == nil || pl.IsMaster || len(pl.Fragments) == 0 {
+		return false
+	}
+	for _, f := range pl.Fragments {
+		if f.IsInit {
+			return false
+		}
+	}
+	for _, f := range pl.Fragments {
+		u := strings.ToLower(f.URL)
+		// Strip query for extension check.
+		if i := strings.IndexByte(u, '?'); i >= 0 {
+			u = u[:i]
+		}
+		if strings.HasSuffix(u, ".ts") || strings.Contains(u, ".ts/") {
+			return true
+		}
+		// Dailymotion-style: .../frag(N)/video/..._vert_2.ts or path ending in _2.ts
+		if strings.Contains(u, "/frag(") && strings.Contains(u, ".ts") {
+			return true
+		}
+	}
+	return false
+}
+
 func resolve(base *url.URL, ref string) (string, error) {
 	ref = strings.TrimSpace(ref)
 	u, err := url.Parse(ref)

@@ -32,6 +32,23 @@ func TestParseMediaPlaylist_fMP4(t *testing.T) {
 	assert.Equal(t, "https://cdn.example/video/1.m4s", pl.Fragments[2].URL)
 	assert.Equal(t, 0, pl.Fragments[0].Index)
 	assert.Equal(t, 2, pl.Fragments[2].Index)
+	assert.False(t, pl.IsMPEGTS(), "fMP4 must not be classified as MPEG-TS")
+}
+
+func TestParseMediaPlaylist_MPEGTS(t *testing.T) {
+	const doc = `#EXTM3U
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-TARGETDURATION:4
+#EXTINF:3.0,
+../../../frag(1)/video/foo_h264_aac_hq_vert_2.ts
+#EXTINF:3.0,
+../../../frag(2)/video/foo_h264_aac_hq_vert_2.ts
+#EXT-X-ENDLIST
+`
+	pl, err := ParseMediaPlaylist(strings.NewReader(doc), "https://vod.example/video/pl.m3u8")
+	require.NoError(t, err)
+	assert.True(t, pl.IsMPEGTS())
+	assert.False(t, pl.Fragments[0].IsInit)
 }
 
 func TestParseMediaPlaylist_MasterVariants(t *testing.T) {

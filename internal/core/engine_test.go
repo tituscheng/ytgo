@@ -438,6 +438,29 @@ func TestEngineRun_OnError_Playlist(t *testing.T) {
 	}
 }
 
+func TestAllowsQualityLadderFallback(t *testing.T) {
+	assert.True(t, allowsQualityLadderFallback(""))
+	assert.True(t, allowsQualityLadderFallback("best"))
+	assert.True(t, allowsQualityLadderFallback("best[height<=720]"))
+	assert.True(t, allowsQualityLadderFallback("bv*+ba/best"))
+	assert.False(t, allowsQualityLadderFallback("hls-480"))
+	assert.False(t, allowsQualityLadderFallback("http-720"))
+}
+
+func TestLowerMuxedHLSFormats(t *testing.T) {
+	primary := ytgo.Format{FormatID: "hls-480", Height: 848, TBR: 836, HasVideo: true, HasAudio: true}
+	all := []ytgo.Format{
+		primary,
+		{FormatID: "hls-720", Height: 1280, TBR: 2000, HasVideo: true, HasAudio: true},
+		{FormatID: "hls-380", Height: 640, TBR: 460, HasVideo: true, HasAudio: true},
+		{FormatID: "hls-aac-q2", HasVideo: false, HasAudio: true},
+		{FormatID: "http-480", Height: 480, HasVideo: true, HasAudio: true},
+	}
+	alts := lowerMuxedHLSFormats(primary, all)
+	require.Len(t, alts, 1)
+	assert.Equal(t, "hls-380", alts[0].FormatID)
+}
+
 // --- Error classification tests ---
 
 func TestIsRetryable(t *testing.T) {

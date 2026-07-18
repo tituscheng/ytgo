@@ -147,7 +147,7 @@ func (e *Engine) Run(ctx context.Context, rawURL string) (*ytgo.PlaylistReport, 
 
 	e.log("extracting", slog.String("extractor", ext.Name()), slog.String("url", rawURL))
 	if e.Config.Verbose {
-		color.Yellow("[%s] Extracting: %s", ext.Name(), rawURL)
+		printTagged(color.New(color.FgYellow), tagInfo, fmt.Sprintf("Extracting via %s: %s", ext.Name(), rawURL))
 	}
 
 	// 2. Extract metadata
@@ -219,7 +219,7 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 			slog.String("video_id", info.ID),
 			slog.String("title", info.Title))
 		if !e.Config.Quiet {
-			color.Green("✓ Already in archive: %s", info.Title)
+			printTagged(color.New(color.FgGreen), tagInfo, "Already in archive: "+info.Title)
 		}
 		return nil, nil
 	}
@@ -255,7 +255,7 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 		slog.Any("format_ids", formatIDs(selected)))
 
 	if e.Config.Verbose {
-		color.Cyan("Selected %d format(s)", len(selected))
+		printTagged(color.New(color.FgCyan), tagInfo, fmt.Sprintf("Selected %d format(s)", len(selected)))
 		for _, f := range selected {
 			fmt.Fprintf(os.Stderr, "  %s: %dx%d %s/%s\n", f.FormatID, f.Width, f.Height, f.VideoCodec, f.AudioCodec)
 		}
@@ -279,7 +279,7 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 	if e.Config.NoOverwrites && !isStdout {
 		if _, err := os.Stat(outputPath); err == nil {
 			if !e.Config.Quiet {
-				color.Green("✓ File already exists, skipping: %s", info.Title)
+				printTagged(color.New(color.FgGreen), tagInfo, "File already exists, skipping: "+info.Title)
 			}
 			return nil, nil
 		}
@@ -296,17 +296,21 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 			temps.Push(partPath)
 			temps.Push(finalPath)
 		}
-		if err := e.downloadFormatToFile(ctx, info, selected[0], partPath, 1, 1); err != nil {
+		used, err := e.downloadSingleFormatResilient(ctx, info, selected[0], partPath)
+		if err != nil {
 			e.reportFailure(ytgo.DownloadFailure{
 				VideoID:   info.ID,
 				Title:     info.Title,
 				URL:       info.OriginalURL,
 				FormatID:  selected[0].FormatID,
 				Stage:     "download",
-				Error:     err.Error(),
+				Error:     downloader.SummarizeStreamError(err),
 				Retryable: isRetryable(err),
 			})
-			return nil, fmt.Errorf("download format %s failed: %w", selected[0].FormatID, err)
+			return nil, fmt.Errorf("download format %s failed: %s", selected[0].FormatID, downloader.SummarizeStreamError(err))
+		}
+		if used.FormatID != selected[0].FormatID {
+			selected[0] = used
 		}
 		// Always rename (even in stdout mode) so that downloaded[] always points
 		// to real files. The stdout path later copies from the final temp file.
@@ -318,10 +322,59 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 			temps.Pop() // partPath consumed by rename
 		}
 		downloaded[0] = finalPath
+	} else if shouldSerializeFormats(info) {
+		// Dailymotion (and similar CDNs) often 504 when video+audio media
+		// playlists are opened in parallel. Download streams one at a time.
+		var failParts []string
+		for i, f := range selected {
+			ext := f.Ext
+			if ext == "" {
+				ext = "mp4"
+			}
+			partPath := fmt.Sprintf("%s.f%s.%s.part", strings.TrimSuffix(outputPath, filepath.Ext(outputPath)), f.FormatID, ext)
+			finalPath := fmt.Sprintf("%s.f%s.%s", strings.TrimSuffix(outputPath, filepath.Ext(outputPath)), f.FormatID, ext)
+			if isStdout {
+				partPath = filepath.Join(os.TempDir(), filepath.Base(finalPath)) + ".part"
+				finalPath = filepath.Join(os.TempDir(), filepath.Base(finalPath))
+				temps.Push(partPath)
+				temps.Push(finalPath)
+			}
+			// total>1 enables line-based ↓/✓/✗ status (same as concurrent UI,
+			// but streams run serially so CDN is not double-opened).
+			if err := e.downloadFormatToFile(ctx, info, f, partPath, i+1, len(selected)); err != nil {
+				summary := downloader.SummarizeStreamError(err)
+				e.reportFailure(ytgo.DownloadFailure{
+					VideoID:   info.ID,
+					Title:     info.Title,
+					URL:       info.OriginalURL,
+					FormatID:  f.FormatID,
+					Stage:     "download",
+					Error:     summary,
+					Retryable: isRetryable(err),
+				})
+				failParts = append(failParts, fmt.Sprintf("%s: %s", f.FormatID, summary))
+				// Continue other streams so the user sees a full failure report
+				// instead of aborting after the first CDN 504.
+				continue
+			}
+			if err := os.Rename(partPath, finalPath); err != nil {
+				return nil, fmt.Errorf("rename part file: %w", err)
+			}
+			if isStdout {
+				temps.Pop()
+				temps.Pop()
+			}
+			downloaded[i] = finalPath
+		}
+		if len(failParts) > 0 {
+			return nil, fmt.Errorf("download failed: %s", strings.Join(failParts, "; "))
+		}
 	} else {
 		// Derive a cancellable context so that SIGINT / parent cancellation
 		// properly aborts all concurrent format downloads (Issue 3).
 		g, gctx := errgroup.WithContext(ctx)
+		var failMu sync.Mutex
+		var failParts []string
 		for i, f := range selected {
 			i, f := i, f
 			g.Go(func() error {
@@ -338,16 +391,22 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 					temps.Push(finalPath)
 				}
 				if err := e.downloadFormatToFile(gctx, info, f, partPath, i+1, len(selected)); err != nil {
+					summary := downloader.SummarizeStreamError(err)
 					e.reportFailure(ytgo.DownloadFailure{
 						VideoID:   info.ID,
 						Title:     info.Title,
 						URL:       info.OriginalURL,
 						FormatID:  f.FormatID,
 						Stage:     "download",
-						Error:     err.Error(),
+						Error:     summary,
 						Retryable: isRetryable(err),
 					})
-					return fmt.Errorf("download format %s failed: %w", f.FormatID, err)
+					failMu.Lock()
+					failParts = append(failParts, fmt.Sprintf("%s: %s", f.FormatID, summary))
+					failMu.Unlock()
+					// Cancel siblings via errgroup, but remember every failure
+					// observed before cancel for a consolidated final message.
+					return fmt.Errorf("%s: %s", f.FormatID, summary)
 				}
 				// Always rename (even in stdout mode) so that downloaded[] always points
 				// to real files for the merger / final stdout copy.
@@ -363,6 +422,12 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 			})
 		}
 		if err := g.Wait(); err != nil {
+			failMu.Lock()
+			parts := append([]string(nil), failParts...)
+			failMu.Unlock()
+			if len(parts) > 0 {
+				return nil, fmt.Errorf("download failed: %s", strings.Join(parts, "; "))
+			}
 			return nil, err
 		}
 	}
@@ -388,23 +453,24 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 		merger := e.makeMerger(info)
 		var mergeSpinner *spinner.Spinner
 		if !e.Config.Quiet && !e.Config.NoProgress {
-			mergeSpinner = newStatusSpinner("Merging video and audio...")
+			mergeSpinner = newStatusSpinner("[merge] Merging video and audio...")
 			mergeSpinner.Start()
 		}
-		merger.Progress = e.ffmpegProgress(info, ytgo.PhaseMerge, "Merging video and audio", mergeSpinner)
+		merger.Progress = e.ffmpegProgress(info, ytgo.PhaseMerge, "[merge] Merging video and audio", mergeSpinner)
 		merged, err := merger.Run(ctx, downloaded, outputPath, e.Config.MergeOutputFormat)
 		if mergeSpinner != nil {
 			mergeSpinner.Stop()
 		}
 		if err != nil {
+			summary := downloader.SummarizeStreamError(err)
 			e.reportFailure(ytgo.DownloadFailure{
 				VideoID:   info.ID,
 				Title:     info.Title,
 				Stage:     "merge",
-				Error:     err.Error(),
+				Error:     summary,
 				Retryable: false,
 			})
-			return fmt.Errorf("merge failed: %w", err)
+			return fmt.Errorf("merge failed: %s", summary)
 		}
 		finalPath = merged
 		for _, p := range downloaded {
@@ -422,10 +488,10 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 		conv := e.makeConverter(info)
 		var convertSpinner *spinner.Spinner
 		if !e.Config.Quiet && !e.Config.NoProgress {
-			convertSpinner = newStatusSpinner("Extracting audio...")
+			convertSpinner = newStatusSpinner("[info] Extracting audio...")
 			convertSpinner.Start()
 		}
-		conv.Progress = e.ffmpegProgress(info, ytgo.PhaseAudio, "Extracting audio", convertSpinner)
+		conv.Progress = e.ffmpegProgress(info, ytgo.PhaseAudio, "[info] Extracting audio", convertSpinner)
 		converted, err := conv.ExtractAudio(ctx, finalPath, e.Config.AudioFormat, e.Config.AudioQuality)
 		if convertSpinner != nil {
 			convertSpinner.Stop()
@@ -514,7 +580,8 @@ func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) (*y
 		return nil, fmt.Errorf("playlist too large (%d entries, maximum supported is %d)", len(info.Entries), maxPlaylistEntries)
 	}
 
-	color.Cyan("Playlist: %s (%d entries)", info.PlaylistTitle, len(info.Entries))
+	printTagged(color.New(color.FgCyan), tagInfo,
+		fmt.Sprintf("Playlist: %s (%d entries)", info.PlaylistTitle, len(info.Entries)))
 
 	// Apply playlist range filters
 	start := e.Config.PlaylistStart - 1
@@ -569,7 +636,8 @@ func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) (*y
 						firstErr = err
 					}
 					if !e.Config.NoWarnings {
-						color.Red("Error post-processing %s: %v", task.info.Title, err)
+						printTagged(color.New(color.FgRed), tagError,
+							fmt.Sprintf("post-processing %s: %s", task.info.Title, downloader.SummarizeStreamError(err)))
 					}
 				} else {
 					reportMu.Lock()
@@ -632,7 +700,8 @@ func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) (*y
 				})
 				reportMu.Unlock()
 				if !e.Config.NoWarnings {
-					color.Red("Error downloading %s: %v", job.Title, err)
+					printTagged(color.New(color.FgRed), tagError,
+						fmt.Sprintf("downloading %s: %s", job.Title, downloader.SummarizeStreamError(err)))
 				}
 				return nil
 			}
@@ -679,14 +748,11 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.Video
 	var s *spinner.Spinner
 	if !concurrent && !e.Config.Quiet && !e.Config.NoProgress {
 		s = spinner.New(spinner.CharSets[14], 100*time.Millisecond)
-		s.Suffix = fmt.Sprintf("  Downloading %s...", label)
+		s.Suffix = fmt.Sprintf("  [download] Downloading %s...", label)
 		s.Start()
 		defer s.Stop()
 	} else if concurrent && !e.Config.Quiet {
 		printDownloading(label)
-		defer func() {
-			printDownloadComplete(label)
-		}()
 	}
 
 	clen := downloader.ParseContentLengthFromURL(f.URL)
@@ -705,7 +771,7 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.Video
 		})
 		if s != nil && tot > 0 {
 			pct := float64(down) / float64(tot) * 100
-			s.Suffix = fmt.Sprintf("  Downloading %s (%.1f%%)", label, pct)
+			s.Suffix = fmt.Sprintf("  [download] Downloading %s (%.1f%%)", label, pct)
 		}
 	}
 
@@ -724,28 +790,42 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.Video
 		Limiter:  e.Downloader.Limiter,
 	}
 
-	var err error
-	err = e.downloadFormatURL(ctx, info, f, dest, d, progressCb)
+	err := e.downloadFormatURL(ctx, info, f, dest, d, progressCb)
 	if err != nil && isForbidden(err) {
 		if !e.Config.Quiet {
-			color.Yellow("[%s] URL expired (403), re-extracting...", info.ID)
+			printRetry("URL expired (403), re-extracting...")
 		}
 		fresh, reextractErr := e.reextract(ctx, info)
 		if reextractErr == nil {
+			matched := false
 			for _, freshFormat := range fresh.Formats {
 				if freshFormat.FormatID == f.FormatID {
-					e.log("403 recovery succeeded, retrying with fresh URL",
+					matched = true
+					e.log("403 recovery: retrying with fresh URL",
 						slog.String("video_id", info.ID),
 						slog.String("format_id", f.FormatID))
-					return e.downloadFormatURL(ctx, fresh, freshFormat, dest, d, progressCb)
+					err = e.downloadFormatURL(ctx, fresh, freshFormat, dest, d, progressCb)
+					break
 				}
 			}
-			// Exact FormatID no longer present after re-extract (YouTube can rotate IDs).
-			// Fall through and return the original 403 so the failure is recorded.
-			e.log("403 recovery: exact format ID not found after re-extract",
-				slog.String("video_id", info.ID),
-				slog.String("format_id", f.FormatID),
-				slog.Int("fresh_formats", len(fresh.Formats)))
+			if !matched {
+				// Exact FormatID no longer present after re-extract (YouTube can rotate IDs).
+				// Keep the original 403 so the failure is recorded.
+				e.log("403 recovery: exact format ID not found after re-extract",
+					slog.String("video_id", info.ID),
+					slog.String("format_id", f.FormatID),
+					slog.Int("fresh_formats", len(fresh.Formats)))
+			}
+		}
+	}
+
+	// Concurrent mode: report outcome only after the download finishes so a
+	// failed stream never shows a green checkmark (defer would always fire).
+	if concurrent && !e.Config.Quiet {
+		if err != nil {
+			printDownloadFailed(label, downloader.SummarizeStreamError(err))
+		} else {
+			printDownloadComplete(label)
 		}
 	}
 	return err
@@ -762,7 +842,11 @@ func (e *Engine) downloadFormatURL(
 	url, isManifest := resolveDownloadURL(info, f)
 	if isManifest {
 		// Prefer native concurrent HLS for VOD media playlists (e.g. Dailymotion
-		// fMP4). Fall back to FFmpeg for masters, live, encrypted, or errors.
+		// fMP4). Fall back to FFmpeg for masters, live, encrypted, or when native
+		// fails. Dailymotion CDN 5xx used to skip FFmpeg (same edge, log noise),
+		// but FFmpeg's sequential/HLS client often still succeeds after native
+		// multi-connection pressure triggers 503/504 — so fall back after a
+		// short cool-down (Quiet keeps ffmpeg stderr out of the UI).
 		if strings.Contains(strings.ToLower(url), ".m3u8") && !info.IsLiveContent {
 			if err := e.hlsFragDownload(ctx, info, url, dest, progressCb); err == nil {
 				return nil
@@ -770,10 +854,22 @@ func (e *Engine) downloadFormatURL(
 				// Don't fall back to FFmpeg after user cancel / deadline.
 				return err
 			} else {
+				summary := downloader.SummarizeStreamError(err)
 				e.log("native HLS download failed, falling back to ffmpeg",
 					slog.String("video_id", info.ID),
 					slog.String("format_id", f.FormatID),
-					slog.String("error", err.Error()))
+					slog.String("error", summary),
+					slog.Bool("transient", downloader.IsTransientStreamError(err)))
+				if isDailymotionInfo(info) && downloader.IsTransientStreamError(err) {
+					// Native partial/TS concat + .hlsfrags are not usable by FFmpeg.
+					clearNativeHLSPartial(dest)
+					if !e.Config.Quiet {
+						printRetry(fmt.Sprintf("CDN %s; retrying via FFmpeg…", summary))
+					}
+					if err := sleepCtx(ctx, 1500*time.Millisecond); err != nil {
+						return err
+					}
+				}
 			}
 		}
 		return e.ffmpegDownloader(progressCb, ffmpegDownloadHeaders(info, url)).DownloadToFile(ctx, url, dest)
@@ -805,15 +901,26 @@ func (e *Engine) hlsFragDownload(
 		headers["User-Agent"] = innertube.WebUserAgent
 	}
 	// Dailymotion (and some CDNs) reject HTTP/2 on playlist/segment edges.
-	forceH1 := strings.Contains(playlistURL, "dailymotion.com") ||
-		strings.Contains(playlistURL, "dmcdn.net") ||
-		strings.Contains(info.WebpageURL, "dailymotion.com") ||
-		strings.Contains(info.OriginalURL, "dailymotion.com")
+	forceH1 := isDailymotionInfo(info) ||
+		strings.Contains(playlistURL, "dailymotion.com") ||
+		strings.Contains(playlistURL, "dmcdn.net")
 
 	workers := hlsfrag.ResolveWorkers(e.Config.ConcurrentFragments)
+	// Soften parallel fragment pressure on fragile DM edges when downloading
+	// high-worker defaults (still concurrent, just less aggressive).
+	// 503/504 storms are common on vod*.cf.dmcdn.net with >4 parallel GETs.
+	if isDailymotionInfo(info) && e.Config.ConcurrentFragments <= 1 && workers > 4 {
+		workers = 4
+	}
+	maxRetries := 0 // hlsfrag default
+	if isDailymotionInfo(info) {
+		// Playlist/segment edges flake; give native more attempts before FFmpeg.
+		maxRetries = 6
+	}
 	e.log("native HLS fragment download",
 		slog.String("video_id", info.ID),
 		slog.Int("workers", workers),
+		slog.Int("max_retries", maxRetries),
 		slog.Bool("force_http1", forceH1))
 
 	hd := &hlsfrag.Downloader{
@@ -823,29 +930,233 @@ func (e *Engine) hlsFragDownload(
 		ForceHTTP1: forceH1,
 		Continue:   e.Config.ContinuePartial,
 		Progress:   hlsfrag.ProgressFunc(progressCb),
+		MaxRetries: maxRetries,
 	}
 	return hd.DownloadToFile(ctx, playlistURL, dest)
 }
 
 func (e *Engine) ffmpegDownloader(progressCb downloader.ProgressFunc, headers map[string]string) *downloader.FFmpegDownloader {
+	// Always Quiet: never stream raw ffmpeg logs. Retry notices only with -v.
 	return &downloader.FFmpegDownloader{
 		FFmpegPath: e.Config.FFmpegLocation,
-		Quiet:      e.Config.Quiet,
+		Quiet:      true,
+		LogRetries: e.Config.Verbose && !e.Config.Quiet,
 		Progress:   progressCb,
 		UserAgent:  innertube.WebUserAgent,
 		Headers:    headers,
 	}
 }
 
-func ffmpegDownloadHeaders(info *extractor.VideoInfo, url string) map[string]string {
-	if strings.Contains(url, "dailymotion.com") ||
-		strings.Contains(url, "dmcdn.net") ||
-		strings.Contains(info.WebpageURL, "dailymotion.com") ||
-		strings.Contains(info.OriginalURL, "dailymotion.com") {
+// dailymotionMediaUA matches the browser profile yt-dlp uses for DM CDN GETs.
+const dailymotionMediaUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+
+// dmSingleFormatCDNRetries is how many times to re-extract + retry the same
+// format after a transient CDN failure (native + FFmpeg already tried inside
+// downloadFormatURL). Separate from per-request fragment retries.
+const dmSingleFormatCDNRetries = 1
+
+func isDailymotionInfo(info *extractor.VideoInfo) bool {
+	if info == nil {
+		return false
+	}
+	return strings.Contains(info.WebpageURL, "dailymotion.com") ||
+		strings.Contains(info.OriginalURL, "dailymotion.com") ||
+		strings.Contains(info.OriginalURL, "dai.ly")
+}
+
+// downloadSingleFormatResilient downloads one selected format. On Dailymotion
+// CDN 5xx it re-extracts fresh signed URLs and, if still failing, tries lower
+// single-mux HLS qualities (e.g. hls-480 → hls-380).
+func (e *Engine) downloadSingleFormatResilient(
+	ctx context.Context,
+	info *extractor.VideoInfo,
+	f extractor.Format,
+	dest string,
+) (extractor.Format, error) {
+	err := e.downloadFormatToFile(ctx, info, f, dest, 1, 1)
+	if err == nil {
+		return f, nil
+	}
+	if ctx.Err() != nil {
+		return f, err
+	}
+	if !isDailymotionInfo(info) || !downloader.IsTransientStreamError(err) {
+		return f, err
+	}
+
+	last := err
+	working := info
+	cur := f
+
+	for attempt := 1; attempt <= dmSingleFormatCDNRetries; attempt++ {
+		if err := sleepCtx(ctx, time.Duration(attempt)*2*time.Second); err != nil {
+			return cur, err
+		}
+		if !e.Config.Quiet {
+			printRetry(fmt.Sprintf("CDN %s; re-extracting and retrying %s…",
+				downloader.SummarizeStreamError(last), cur.FormatID))
+		}
+		fresh, reErr := e.reextract(ctx, working)
+		if reErr != nil {
+			e.log("CDN recovery re-extract failed",
+				slog.String("video_id", info.ID),
+				slog.String("error", reErr.Error()))
+			continue
+		}
+		working = fresh
+		matched := findFormatByID(fresh.Formats, cur.FormatID)
+		if matched == nil {
+			e.log("CDN recovery: format missing after re-extract",
+				slog.String("video_id", info.ID),
+				slog.String("format_id", cur.FormatID))
+			continue
+		}
+		clearNativeHLSPartial(dest)
+		last = e.downloadFormatToFile(ctx, fresh, *matched, dest, 1, 1)
+		if last == nil {
+			return *matched, nil
+		}
+		if ctx.Err() != nil {
+			return cur, last
+		}
+		if !downloader.IsTransientStreamError(last) {
+			return cur, last
+		}
+		cur = *matched
+	}
+
+	// Quality ladder: only when the user asked for a generic best-style pick.
+	if !allowsQualityLadderFallback(e.Config.Format) {
+		return cur, last
+	}
+	for _, alt := range lowerMuxedHLSFormats(cur, working.Formats) {
+		if err := sleepCtx(ctx, 1500*time.Millisecond); err != nil {
+			return cur, err
+		}
+		if !e.Config.Quiet {
+			printRetry(fmt.Sprintf("CDN %s; trying lower quality %s…",
+				downloader.SummarizeStreamError(last), alt.FormatID))
+		}
+		clearNativeHLSPartial(dest)
+		last = e.downloadFormatToFile(ctx, working, alt, dest, 1, 1)
+		if last == nil {
+			return alt, nil
+		}
+		if ctx.Err() != nil {
+			return cur, last
+		}
+		if !downloader.IsTransientStreamError(last) {
+			return cur, last
+		}
+	}
+	return cur, last
+}
+
+func findFormatByID(formats []extractor.Format, id string) *extractor.Format {
+	for i := range formats {
+		if formats[i].FormatID == id {
+			return &formats[i]
+		}
+	}
+	return nil
+}
+
+// allowsQualityLadderFallback is true for default / best-style selectors where
+// silently taking a lower rung is acceptable. Exact format IDs (-f hls-480)
+// must not be substituted.
+func allowsQualityLadderFallback(selector string) bool {
+	s := strings.TrimSpace(strings.ToLower(selector))
+	if s == "" || s == "best" || s == "b" {
+		return true
+	}
+	// best[height<=720] / bestvideo+bestaudio style still want "best available".
+	if strings.HasPrefix(s, "best") || strings.HasPrefix(s, "bv") {
+		return true
+	}
+	return false
+}
+
+// lowerMuxedHLSFormats returns other single-file HLS formats (video+audio) with
+// lower or equal height / TBR than primary, best-first among remaining.
+func lowerMuxedHLSFormats(primary extractor.Format, all []extractor.Format) []extractor.Format {
+	var alts []extractor.Format
+	for _, f := range all {
+		if f.FormatID == primary.FormatID {
+			continue
+		}
+		if !strings.HasPrefix(f.FormatID, "hls-") {
+			continue
+		}
+		// Skip demuxed audio-only or video-only rungs.
+		if !f.HasVideo || !f.HasAudio {
+			continue
+		}
+		if primary.Height > 0 && f.Height > primary.Height {
+			continue
+		}
+		if primary.Height > 0 && f.Height == primary.Height && f.TBR > primary.TBR {
+			continue
+		}
+		if primary.Height <= 0 && primary.TBR > 0 && f.TBR > primary.TBR {
+			continue
+		}
+		alts = append(alts, f)
+	}
+	// Prefer higher remaining quality first.
+	for i := 0; i < len(alts); i++ {
+		for j := i + 1; j < len(alts); j++ {
+			if formatQualityScore(alts[j]) > formatQualityScore(alts[i]) {
+				alts[i], alts[j] = alts[j], alts[i]
+			}
+		}
+	}
+	return alts
+}
+
+func formatQualityScore(f extractor.Format) float64 {
+	h := float64(f.Height)
+	if h <= 0 {
+		h = f.TBR
+	}
+	return h*1000 + f.TBR
+}
+
+func clearNativeHLSPartial(dest string) {
+	_ = os.Remove(dest)
+	_ = os.Remove(dest + ".hlsfrags")
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// shouldSerializeFormats is true when parallel A/V downloads tend to trip the CDN.
+func shouldSerializeFormats(info *extractor.VideoInfo) bool {
+	return isDailymotionInfo(info)
+}
+
+func ffmpegDownloadHeaders(info *extractor.VideoInfo, streamURL string) map[string]string {
+	if isDailymotionInfo(info) ||
+		strings.Contains(streamURL, "dailymotion.com") ||
+		strings.Contains(streamURL, "dmcdn.net") {
+		// Match yt-dlp media requests: no Origin (avoids some CF edge paths),
+		// browser Accept / Sec-Fetch-Mode, Windows Chrome UA.
 		return map[string]string{
-			"Origin":     "https://www.dailymotion.com",
-			"Referer":    "https://www.dailymotion.com/",
-			"User-Agent": innertube.WebUserAgent,
+			"User-Agent":      dailymotionMediaUA,
+			"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+			"Accept-Language": "en-us,en;q=0.5",
+			"Sec-Fetch-Mode":  "navigate",
+			"Referer":         "https://www.dailymotion.com/",
 		}
 	}
 	return nil
@@ -1155,7 +1466,7 @@ func (e *Engine) printFormats(info *extractor.VideoInfo) {
 	if name == "" {
 		name = "unknown"
 	}
-	fmt.Fprintf(os.Stderr, "[%s] %s: Available formats\n", name, info.ID)
+	fmt.Fprintf(os.Stderr, "[info] %s %s: available formats\n", name, info.ID)
 	for _, f := range info.Formats {
 		codec := f.VideoCodec
 		if f.AudioCodec != "" && codec != "" {

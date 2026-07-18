@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -9,6 +10,15 @@ import (
 	"github.com/fatih/color"
 
 	"github.com/tituscheng/ytgo/internal/extractor"
+)
+
+// Bracketed status tags for user-facing lines (yt-dlp style).
+// Only these go to the terminal in normal mode; ffmpeg/slog stay quiet.
+const (
+	tagDownload = "download"
+	tagMerge    = "merge"
+	tagInfo     = "info"
+	tagError    = "error"
 )
 
 func formatStreamLabel(f extractor.Format) string {
@@ -39,22 +49,43 @@ func newStatusSpinner(suffix string) *spinner.Spinner {
 	return s
 }
 
+// printTagged writes one user-facing line: [tag] message
+func printTagged(c *color.Color, tag, msg string) {
+	if c == nil {
+		fmt.Fprintf(os.Stderr, "[%s] %s\n", tag, msg)
+		return
+	}
+	c.Fprintf(os.Stderr, "[%s] %s\n", tag, msg)
+}
+
 func printAlreadyDownloaded(title, path string) {
 	name := title
 	if name == "" {
 		name = filepath.Base(path)
 	}
-	color.Green("✓ Already downloaded: %s", name)
+	printTagged(color.New(color.FgGreen), tagInfo, "Already downloaded: "+name)
 }
 
 func printDownloading(label string) {
-	color.Cyan("↓ Downloading %s...", label)
+	printTagged(color.New(color.FgCyan), tagDownload, "Downloading "+label+"...")
 }
 
 func printDownloadComplete(label string) {
-	color.Green("✓ %s downloaded", label)
+	printTagged(color.New(color.FgGreen), tagDownload, label+" downloaded")
+}
+
+func printDownloadFailed(label string, errOrSummary any) {
+	printTagged(color.New(color.FgRed), tagError, fmt.Sprintf("%s failed: %v", label, errOrSummary))
 }
 
 func printSaved(path string) {
-	color.Green("✓ Saved: %s", filepath.Base(path))
+	printTagged(color.New(color.FgGreen), tagInfo, "Saved: "+filepath.Base(path))
+}
+
+func printRetry(msg string) {
+	printTagged(color.New(color.FgYellow), tagDownload, msg)
+}
+
+func printMergeStatus(msg string) {
+	printTagged(color.New(color.FgCyan), tagMerge, msg)
 }

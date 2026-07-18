@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -24,6 +25,12 @@ const DefaultWorkers = 12
 // MaxWorkers caps adaptive/user concurrency.
 const MaxWorkers = 32
 
+// defaultMaxRetries is per-request retries after the first attempt for
+// playlist and fragment GETs. CDN edges (e.g. Dailymotion vod*.cf.dmcdn.net)
+// frequently return intermittent 504s that clear on a short backoff.
+// Kept modest so a dead edge fails in ~1 minute, not several.
+const defaultMaxRetries = 4
+
 // ProgressFunc reports bytes written so far and total estimate (0 if unknown).
 type ProgressFunc func(downloaded, total int64)
 
@@ -36,7 +43,7 @@ type Downloader struct {
 	Headers map[string]string
 	// Progress is optional.
 	Progress ProgressFunc
-	// MaxRetries is per-fragment retries after the first attempt (default 3).
+	// MaxRetries is per-request retries after the first attempt (default 6).
 	MaxRetries int
 	// ForceHTTP1 disables HTTP/2 (required for some Dailymotion CDN edges).
 	ForceHTTP1 bool
@@ -69,7 +76,7 @@ func (d *Downloader) DownloadToFile(ctx context.Context, playlistURL, destPath s
 	}
 	retries := d.MaxRetries
 	if retries <= 0 {
-		retries = 3
+		retries = defaultMaxRetries
 	}
 
 	return d.downloadPlaylist(ctx, client, playlistURL, destPath, workers, retries, 0)
@@ -367,6 +374,10 @@ func (d *Downloader) httpClient() *http.Client {
 		tr.TLSNextProto = map[string]func(authority string, c *tls.Conn) http.RoundTripper{}
 		tr.MaxIdleConnsPerHost = MaxWorkers + 4
 		tr.MaxConnsPerHost = 0
+		// Fail slow CDN edges quickly so retries can try another connection
+		// instead of hanging until the parent context deadline.
+		// 12s × (1+defaultMaxRetries) ≈ 1 minute worst-case for a dead edge.
+		tr.ResponseHeaderTimeout = 12 * time.Second
 		return &http.Client{Transport: tr, Timeout: timeout}
 	}
 	if d.Client != nil {
@@ -406,10 +417,7 @@ func (d *Downloader) getWithRetry(ctx context.Context, client *http.Client, rawU
 	var last error
 	for attempt := 0; attempt <= retries; attempt++ {
 		if attempt > 0 {
-			delay := time.Duration(100*(1<<(attempt-1))) * time.Millisecond
-			if delay > 2*time.Second {
-				delay = 2 * time.Second
-			}
+			delay := retryBackoff(attempt, last)
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
@@ -421,8 +429,63 @@ func (d *Downloader) getWithRetry(ctx context.Context, client *http.Client, rawU
 			return data, nil
 		}
 		last = err
+		// Non-retryable client errors (4xx except 408/429).
+		if isNonRetryableHTTP(err) {
+			return nil, last
+		}
 	}
 	return nil, last
+}
+
+// retryBackoff grows with attempt; CDN 5xx (esp. Dailymotion 503/504) need a
+// longer cool-down than connection blips so the edge can recover.
+func retryBackoff(attempt int, last error) time.Duration {
+	// attempt is 1-based for the first retry.
+	base := 250 * time.Millisecond
+	capDelay := 2 * time.Second
+	if isCDNUnavailable(last) {
+		base = 500 * time.Millisecond
+		capDelay = 5 * time.Second
+	}
+	delay := time.Duration(int64(base) * int64(1<<(attempt-1)))
+	if delay > capDelay {
+		return capDelay
+	}
+	return delay
+}
+
+func isCDNUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "HTTP 502") ||
+		strings.Contains(msg, "HTTP 503") ||
+		strings.Contains(msg, "HTTP 504")
+}
+
+func isNonRetryableHTTP(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	// "HTTP 403: …" etc. 408 Request Timeout and 429 are retryable.
+	if !strings.HasPrefix(msg, "HTTP ") {
+		return false
+	}
+	// Parse status after "HTTP ".
+	rest := strings.TrimPrefix(msg, "HTTP ")
+	var code int
+	for i := 0; i < len(rest) && rest[i] >= '0' && rest[i] <= '9'; i++ {
+		code = code*10 + int(rest[i]-'0')
+	}
+	if code == 0 {
+		return false
+	}
+	if code == http.StatusRequestTimeout || code == http.StatusTooManyRequests {
+		return false
+	}
+	return code >= 400 && code < 500
 }
 
 func truncate(s string, n int) string {

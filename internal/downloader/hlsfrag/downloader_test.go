@@ -15,6 +15,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestRetryBackoff_CDNUnavailableLonger(t *testing.T) {
+	blip := retryBackoff(1, fmt.Errorf("connection reset"))
+	cdn := retryBackoff(1, fmt.Errorf("HTTP 503: unavailable"))
+	assert.Greater(t, cdn, blip)
+	assert.LessOrEqual(t, retryBackoff(10, fmt.Errorf("HTTP 504")), 5*time.Second)
+}
+
 func TestDownloadToFile_ConcatenatesInOrder(t *testing.T) {
 	var hits atomic.Int32
 	mux := http.NewServeMux()

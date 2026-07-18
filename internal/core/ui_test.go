@@ -19,3 +19,9 @@ func TestFormatStreamLabel(t *testing.T) {
 		FormatID: "140", HasAudio: true, ABR: 128,
 	}))
 }
+
+// Ensure failure helper stays available for concurrent download reporting.
+// (printDownloadFailed is side-effectful; just smoke-test it doesn't panic.)
+func TestPrintDownloadFailed_NoPanic(t *testing.T) {
+	printDownloadFailed("audio (~128 kbps)", assert.AnError)
+}

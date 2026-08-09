@@ -207,6 +207,12 @@ func mapFormat(f innertube.Format) extractor.Format {
 		QualityLabel:  f.QualityLabel,
 		AudioChannels: f.AudioChannels,
 	}
+	// Prefer averageBitrate for ABR (audio ranking); fall back to peak bitrate.
+	if f.AverageBitrate > 0 {
+		format.ABR = float64(f.AverageBitrate) / 1000
+	} else if strings.HasPrefix(f.MimeType, "audio/") && f.Bitrate > 0 {
+		format.ABR = float64(f.Bitrate) / 1000
+	}
 	format.HasVideo = strings.HasPrefix(f.MimeType, "video/")
 	format.HasAudio = strings.HasPrefix(f.MimeType, "audio/")
 	if format.HasVideo && f.AudioChannels > 0 {

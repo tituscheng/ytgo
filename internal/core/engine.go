@@ -341,7 +341,8 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 			}
 			// total>1 enables line-based ↓/✓/✗ status (same as concurrent UI,
 			// but streams run serially so CDN is not double-opened).
-			if err := e.downloadFormatToFile(ctx, info, f, partPath, i+1, len(selected)); err != nil {
+			used, err := e.downloadFormatToFile(ctx, info, f, partPath, i+1, len(selected))
+			if err != nil {
 				summary := downloader.SummarizeStreamError(err)
 				e.reportFailure(ytgo.DownloadFailure{
 					VideoID:   info.ID,
@@ -356,6 +357,9 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 				// Continue other streams so the user sees a full failure report
 				// instead of aborting after the first CDN 504.
 				continue
+			}
+			if used.FormatID != f.FormatID {
+				selected[i] = used
 			}
 			if err := renamePartFile(partPath, finalPath); err != nil {
 				return nil, err
@@ -390,7 +394,8 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 					temps.Push(partPath)
 					temps.Push(finalPath)
 				}
-				if err := e.downloadFormatToFile(gctx, info, f, partPath, i+1, len(selected)); err != nil {
+				used, err := e.downloadFormatToFile(gctx, info, f, partPath, i+1, len(selected))
+				if err != nil {
 					summary := downloader.SummarizeStreamError(err)
 					e.reportFailure(ytgo.DownloadFailure{
 						VideoID:   info.ID,
@@ -407,6 +412,11 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 					// Cancel siblings via errgroup, but remember every failure
 					// observed before cancel for a consolidated final message.
 					return fmt.Errorf("%s: %s", f.FormatID, summary)
+				}
+				if used.FormatID != f.FormatID {
+					// selected is written only from the owning index; concurrent
+					// formats touch distinct slots.
+					selected[i] = used
 				}
 				// Always rename (even in stdout mode) so that downloaded[] always points
 				// to real files for the merger / final stdout copy.
@@ -734,7 +744,22 @@ func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) (*y
 	return report, postprocErr
 }
 
-func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.VideoInfo, f extractor.Format, dest string, current, total int) error {
+// downloadFormatToFile downloads one format to dest. On HTTP 403 it re-extracts
+// a fresh URL for the same FormatID, then (for generic selectors like ba/best)
+// tries same-class alternate formats. The returned Format is the one that
+// actually landed on disk.
+func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.VideoInfo, f extractor.Format, dest string, current, total int) (extractor.Format, error) {
+	return e.downloadFormatToFileInner(ctx, info, f, dest, current, total, true)
+}
+
+func (e *Engine) downloadFormatToFileInner(
+	ctx context.Context,
+	info *extractor.VideoInfo,
+	f extractor.Format,
+	dest string,
+	current, total int,
+	allowAlt bool,
+) (extractor.Format, error) {
 	e.log("starting format download",
 		slog.String("video_id", info.ID),
 		slog.String("format_id", f.FormatID),
@@ -755,17 +780,15 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.Video
 		printDownloading(label)
 	}
 
-	clen := downloader.ParseContentLengthFromURL(f.URL)
-
-	// Build the progress callback: structured event (one per format) + spinner.
-	// Per-video aggregation across formats is the consumer's responsibility;
-	// events carry FormatID so they can sum by VideoID if desired.
+	// progressFormatID is updated when we fall back to an alternate itag so
+	// structured progress events stay accurate for consumers.
+	progressFormatID := f.FormatID
 	progressCb := func(down, tot int64) {
 		e.reportProgress(ytgo.Progress{
 			VideoID:  info.ID,
 			Title:    info.Title,
 			Phase:    ytgo.PhaseDownload,
-			FormatID: f.FormatID,
+			FormatID: progressFormatID,
 			Cur:      down,
 			Tot:      tot,
 		})
@@ -775,28 +798,16 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.Video
 		}
 	}
 
-	// Use a local Downloader instance to avoid race on the Progress callback
-	d := &downloader.Downloader{
-		Client:     e.Downloader.Client,
-		BufferPool: e.Downloader.BufferPool,
-		Workers:    e.Downloader.Workers,
-		Identity: &downloader.DownloadIdentity{
-			VideoID:       info.ID,
-			FormatID:      f.FormatID,
-			ContentLength: clen,
-		},
-		Continue: e.Config.ContinuePartial,
-		Progress: progressCb,
-		Limiter:  e.Downloader.Limiter,
-	}
-
-	err := e.downloadFormatURL(ctx, info, f, dest, d, progressCb)
+	used := f
+	err := e.downloadFormatOnce(ctx, info, f, dest, progressCb)
 	if err != nil && isForbidden(err) {
 		if !e.Config.Quiet {
 			printRetry("URL expired (403), re-extracting...")
 		}
+		working := info
 		fresh, reextractErr := e.reextract(ctx, info)
 		if reextractErr == nil {
+			working = fresh
 			matched := false
 			for _, freshFormat := range fresh.Formats {
 				if freshFormat.FormatID == f.FormatID {
@@ -804,17 +815,58 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.Video
 					e.log("403 recovery: retrying with fresh URL",
 						slog.String("video_id", info.ID),
 						slog.String("format_id", f.FormatID))
-					err = e.downloadFormatURL(ctx, fresh, freshFormat, dest, d, progressCb)
+					clearPartialDownload(dest)
+					err = e.downloadFormatOnce(ctx, fresh, freshFormat, dest, progressCb)
+					if err == nil {
+						used = freshFormat
+					}
 					break
 				}
 			}
 			if !matched {
 				// Exact FormatID no longer present after re-extract (YouTube can rotate IDs).
-				// Keep the original 403 so the failure is recorded.
+				// Keep the original 403 so the failure is recorded / alt ladder can run.
 				e.log("403 recovery: exact format ID not found after re-extract",
 					slog.String("video_id", info.ID),
 					slog.String("format_id", f.FormatID),
 					slog.Int("fresh_formats", len(fresh.Formats)))
+			}
+		}
+
+		// Same itag still forbidden (or missing): for best-style selectors try
+		// other audio/video streams of the same class (e.g. 140 → 251 → 139).
+		if err != nil && isForbidden(err) && allowAlt && allowsQualityLadderFallback(e.Config.Format) {
+			for _, alt := range alternateFormatsAfterForbidden(f, working.Formats, e.Config.ExtractAudio) {
+				if ctx.Err() != nil {
+					err = ctx.Err()
+					break
+				}
+				if !e.Config.Quiet {
+					printRetry(fmt.Sprintf("HTTP 403; trying alternate format %s…", alt.FormatID))
+				}
+				e.log("403 recovery: trying alternate format",
+					slog.String("video_id", info.ID),
+					slog.String("from_format", f.FormatID),
+					slog.String("to_format", alt.FormatID))
+				clearPartialDownload(dest)
+				progressFormatID = alt.FormatID
+				label = formatStreamLabel(alt)
+				altErr := e.downloadFormatOnce(ctx, working, alt, dest, progressCb)
+				if altErr == nil {
+					used = alt
+					err = nil
+					break
+				}
+				if ctx.Err() != nil {
+					err = ctx.Err()
+					break
+				}
+				// Keep walking the ladder on further 403 / transient CDN errors;
+				// non-recoverable errors still allow trying the next alt.
+				e.log("403 recovery: alternate format failed",
+					slog.String("video_id", info.ID),
+					slog.String("format_id", alt.FormatID),
+					slog.String("error", downloader.SummarizeStreamError(altErr)))
 			}
 		}
 	}
@@ -828,7 +880,44 @@ func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.Video
 			printDownloadComplete(label)
 		}
 	}
-	return err
+	if err != nil {
+		return f, err
+	}
+	return used, nil
+}
+
+// downloadFormatOnce performs a single format download attempt (no 403 ladder).
+func (e *Engine) downloadFormatOnce(
+	ctx context.Context,
+	info *extractor.VideoInfo,
+	f extractor.Format,
+	dest string,
+	progressCb downloader.ProgressFunc,
+) error {
+	clen := downloader.ParseContentLengthFromURL(f.URL)
+	if clen <= 0 {
+		clen = f.Filesize
+	}
+	d := &downloader.Downloader{
+		Client:     e.Downloader.Client,
+		BufferPool: e.Downloader.BufferPool,
+		Workers:    e.Downloader.Workers,
+		Identity: &downloader.DownloadIdentity{
+			VideoID:       info.ID,
+			FormatID:      f.FormatID,
+			ContentLength: clen,
+		},
+		Continue: e.Config.ContinuePartial,
+		Progress: progressCb,
+		Limiter:  e.Downloader.Limiter,
+	}
+	return e.downloadFormatURL(ctx, info, f, dest, d, progressCb)
+}
+
+// clearPartialDownload removes a failed partial so the next attempt starts clean.
+func clearPartialDownload(dest string) {
+	_ = os.Remove(dest)
+	clearNativeHLSPartial(dest)
 }
 
 func (e *Engine) downloadFormatURL(
@@ -988,16 +1077,17 @@ func isDailymotionInfo(info *extractor.VideoInfo) bool {
 
 // downloadSingleFormatResilient downloads one selected format. On Dailymotion
 // CDN 5xx it re-extracts fresh signed URLs and, if still failing, tries lower
-// single-mux HLS qualities (e.g. hls-480 → hls-380).
+// single-mux HLS qualities (e.g. hls-480 → hls-380). YouTube progressive 403
+// recovery (alternate itags) lives in downloadFormatToFileInner.
 func (e *Engine) downloadSingleFormatResilient(
 	ctx context.Context,
 	info *extractor.VideoInfo,
 	f extractor.Format,
 	dest string,
 ) (extractor.Format, error) {
-	err := e.downloadFormatToFile(ctx, info, f, dest, 1, 1)
+	used, err := e.downloadFormatToFile(ctx, info, f, dest, 1, 1)
 	if err == nil {
-		return f, nil
+		return used, nil
 	}
 	if ctx.Err() != nil {
 		return f, err
@@ -1034,9 +1124,11 @@ func (e *Engine) downloadSingleFormatResilient(
 			continue
 		}
 		clearNativeHLSPartial(dest)
-		last = e.downloadFormatToFile(ctx, fresh, *matched, dest, 1, 1)
+		// Skip nested progressive 403 alt ladder during DM CDN retries; the
+		// muxed HLS quality ladder below is the intended recovery path.
+		used, last = e.downloadFormatToFileInner(ctx, fresh, *matched, dest, 1, 1, false)
 		if last == nil {
-			return *matched, nil
+			return used, nil
 		}
 		if ctx.Err() != nil {
 			return cur, last
@@ -1060,9 +1152,9 @@ func (e *Engine) downloadSingleFormatResilient(
 				downloader.SummarizeStreamError(last), alt.FormatID))
 		}
 		clearNativeHLSPartial(dest)
-		last = e.downloadFormatToFile(ctx, working, alt, dest, 1, 1)
+		used, last = e.downloadFormatToFileInner(ctx, working, alt, dest, 1, 1, false)
 		if last == nil {
-			return alt, nil
+			return used, nil
 		}
 		if ctx.Err() != nil {
 			return cur, last
@@ -1088,14 +1180,92 @@ func findFormatByID(formats []extractor.Format, id string) *extractor.Format {
 // must not be substituted.
 func allowsQualityLadderFallback(selector string) bool {
 	s := strings.TrimSpace(strings.ToLower(selector))
-	if s == "" || s == "best" || s == "b" {
+	if s == "" || s == "best" || s == "b" || s == "ba" || s == "bv" || s == "bv*" {
 		return true
 	}
-	// best[height<=720] / bestvideo+bestaudio style still want "best available".
-	if strings.HasPrefix(s, "best") || strings.HasPrefix(s, "bv") {
+	// best[height<=720] / bestvideo+bestaudio / ba/best / bv*+ba/best still want
+	// "best available" rather than a hard fail on one forbidden itag.
+	if strings.HasPrefix(s, "best") || strings.HasPrefix(s, "bv") || strings.HasPrefix(s, "ba") {
 		return true
 	}
 	return false
+}
+
+// alternateFormatsAfterForbidden returns same-class substitutes when a
+// progressive stream is forbidden (HTTP 403). Order is best-first among the
+// remaining candidates that are not clearly higher quality than primary (so a
+// failed 720p does not thrash on 1080p first).
+//
+// When primary is audio-only and extractAudio is true (CLI -x / API ExtractAudio),
+// muxed A/V and HLS/DASH follow pure audio alternatives so single-stream audio
+// extraction can still succeed. When extractAudio is false (e.g. demuxed
+// bv+ba merge), only pure audio-only alts are offered so the companion video
+// stream still merges cleanly.
+func alternateFormatsAfterForbidden(primary extractor.Format, all []extractor.Format, extractAudio bool) []extractor.Format {
+	var sameClass []extractor.Format
+	var extractFallback []extractor.Format
+
+	primaryAudioOnly := primary.HasAudio && !primary.HasVideo
+	primaryVideoOnly := primary.HasVideo && !primary.HasAudio
+	primaryCombined := isCombinedOrManifest(primary)
+
+	for _, f := range all {
+		if f.FormatID == primary.FormatID || strings.TrimSpace(f.URL) == "" {
+			continue
+		}
+		if isClearlyHigherQuality(primary, f) {
+			continue
+		}
+		fAudioOnly := f.HasAudio && !f.HasVideo
+		fVideoOnly := f.HasVideo && !f.HasAudio
+		fCombined := isCombinedOrManifest(f)
+
+		switch {
+		case primaryAudioOnly:
+			if fAudioOnly {
+				sameClass = append(sameClass, f)
+			} else if extractAudio && fCombined {
+				extractFallback = append(extractFallback, f)
+			}
+		case primaryVideoOnly:
+			if fVideoOnly {
+				sameClass = append(sameClass, f)
+			}
+		case primaryCombined:
+			if fCombined {
+				sameClass = append(sameClass, f)
+			}
+		}
+	}
+
+	sortFormatsBestFirst(sameClass)
+	sortFormatsBestFirst(extractFallback)
+	return append(sameClass, extractFallback...)
+}
+
+// isClearlyHigherQuality reports whether cand is a video step up from primary
+// (e.g. 720p → 1080p) and therefore a poor first fallback after the CDN
+// rejected primary. Audio-only alts are never filtered here; they are ordered
+// best-first so a failed 140 still tries 251/249/139.
+func isClearlyHigherQuality(primary, cand extractor.Format) bool {
+	return primary.Height > 0 && cand.Height > primary.Height
+}
+
+func isCombinedOrManifest(f extractor.Format) bool {
+	if f.FormatID == "hls" || f.FormatID == "dash" {
+		return true
+	}
+	return f.HasVideo && f.HasAudio
+}
+
+func sortFormatsBestFirst(formats []extractor.Format) {
+	for i := 0; i < len(formats); i++ {
+		for j := i + 1; j < len(formats); j++ {
+			if formatQualityScore(formats[j]) > formatQualityScore(formats[i]) {
+				formats[i], formats[j] = formats[j], formats[i]
+			}
+		}
+	}
 }
 
 // lowerMuxedHLSFormats returns other single-file HLS formats (video+audio) with
@@ -1138,9 +1308,23 @@ func lowerMuxedHLSFormats(primary extractor.Format, all []extractor.Format) []ex
 func formatQualityScore(f extractor.Format) float64 {
 	h := float64(f.Height)
 	if h <= 0 {
-		h = f.TBR
+		// Audio-only / unknown height: prefer ABR, then TBR, then filesize.
+		if f.ABR > 0 {
+			h = f.ABR
+		} else if f.TBR > 0 {
+			h = f.TBR
+		} else if f.Filesize > 0 {
+			h = float64(f.Filesize) / 1e5
+		}
 	}
-	return h*1000 + f.TBR
+	s := h*1000 + f.TBR
+	if f.ABR > 0 {
+		s += f.ABR
+	}
+	if f.Filesize > 0 {
+		s += float64(f.Filesize) / 1e6
+	}
+	return s
 }
 
 func clearNativeHLSPartial(dest string) {

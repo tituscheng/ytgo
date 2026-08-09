@@ -443,8 +443,77 @@ func TestAllowsQualityLadderFallback(t *testing.T) {
 	assert.True(t, allowsQualityLadderFallback("best"))
 	assert.True(t, allowsQualityLadderFallback("best[height<=720]"))
 	assert.True(t, allowsQualityLadderFallback("bv*+ba/best"))
+	assert.True(t, allowsQualityLadderFallback("ba"))
+	assert.True(t, allowsQualityLadderFallback("ba/best"))
+	assert.True(t, allowsQualityLadderFallback("bv"))
+	assert.True(t, allowsQualityLadderFallback("bv*"))
 	assert.False(t, allowsQualityLadderFallback("hls-480"))
 	assert.False(t, allowsQualityLadderFallback("http-720"))
+	assert.False(t, allowsQualityLadderFallback("140"))
+	assert.False(t, allowsQualityLadderFallback("251"))
+}
+
+func TestAlternateFormatsAfterForbidden(t *testing.T) {
+	primary := ytgo.Format{FormatID: "140", HasAudio: true, HasVideo: false, TBR: 130, Filesize: 60_000_000}
+	all := []ytgo.Format{
+		primary,
+		{FormatID: "251", HasAudio: true, HasVideo: false, TBR: 160, Filesize: 55_000_000, URL: "https://example.com/251"},
+		{FormatID: "249", HasAudio: true, HasVideo: false, TBR: 50, Filesize: 25_000_000, URL: "https://example.com/249"},
+		{FormatID: "139", HasAudio: true, HasVideo: false, TBR: 48, Filesize: 24_000_000, URL: "https://example.com/139"},
+		{FormatID: "136", HasAudio: false, HasVideo: true, Height: 720, URL: "https://example.com/136"},
+		{FormatID: "18", HasAudio: true, HasVideo: true, Height: 360, URL: "https://example.com/18"},
+		{FormatID: "hls", HasAudio: true, HasVideo: true, URL: "https://example.com/hls.m3u8"},
+		{FormatID: "no-url", HasAudio: true, HasVideo: false, TBR: 200}, // skipped: empty URL
+	}
+
+	t.Run("audio-only without extract keeps pure audio", func(t *testing.T) {
+		alts := alternateFormatsAfterForbidden(primary, all, false)
+		require.Len(t, alts, 3)
+		// Best-first by TBR/filesize score: 251, 249, 139
+		assert.Equal(t, "251", alts[0].FormatID)
+		ids := formatIDs(alts)
+		assert.NotContains(t, ids, "140")
+		assert.NotContains(t, ids, "136")
+		assert.NotContains(t, ids, "18")
+		assert.NotContains(t, ids, "hls")
+		assert.NotContains(t, ids, "no-url")
+	})
+
+	t.Run("audio-only with extract appends muxed and hls", func(t *testing.T) {
+		alts := alternateFormatsAfterForbidden(primary, all, true)
+		require.GreaterOrEqual(t, len(alts), 4)
+		// Pure audio first, then combined/hls.
+		assert.Equal(t, "251", alts[0].FormatID)
+		ids := formatIDs(alts)
+		assert.Contains(t, ids, "18")
+		assert.Contains(t, ids, "hls")
+		assert.NotContains(t, ids, "136")
+		// Muxed candidates come after pure audio.
+		assert.Less(t, indexOfID(alts, "251"), indexOfID(alts, "18"))
+		assert.Less(t, indexOfID(alts, "139"), indexOfID(alts, "hls"))
+	})
+
+	t.Run("video-only stays video-only", func(t *testing.T) {
+		v := ytgo.Format{FormatID: "136", HasVideo: true, HasAudio: false, Height: 720, URL: "https://example.com/136"}
+		allV := []ytgo.Format{
+			v,
+			{FormatID: "135", HasVideo: true, HasAudio: false, Height: 480, URL: "https://example.com/135"},
+			{FormatID: "140", HasVideo: false, HasAudio: true, URL: "https://example.com/140"},
+			{FormatID: "18", HasVideo: true, HasAudio: true, Height: 360, URL: "https://example.com/18"},
+		}
+		alts := alternateFormatsAfterForbidden(v, allV, false)
+		require.Len(t, alts, 1)
+		assert.Equal(t, "135", alts[0].FormatID)
+	})
+}
+
+func indexOfID(formats []ytgo.Format, id string) int {
+	for i, f := range formats {
+		if f.FormatID == id {
+			return i
+		}
+	}
+	return -1
 }
 
 func TestLowerMuxedHLSFormats(t *testing.T) {

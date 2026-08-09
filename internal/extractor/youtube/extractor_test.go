@@ -61,6 +61,29 @@ func TestMapFormat(t *testing.T) {
 	assert.Equal(t, int64(12345678), format.Filesize)
 }
 
+func TestMapFormat_AudioABR(t *testing.T) {
+	f := innertube.Format{
+		ItagNo:         140,
+		URL:            "https://example.com/audio.m4a",
+		MimeType:       `audio/mp4; codecs="mp4a.40.2"`,
+		Bitrate:        130000,
+		AverageBitrate: 128000,
+		ContentLength:  60000000,
+		AudioChannels:  2,
+	}
+	format := mapFormat(f)
+	assert.Equal(t, "140", format.FormatID)
+	assert.True(t, format.HasAudio)
+	assert.False(t, format.HasVideo)
+	assert.InDelta(t, 128.0, format.ABR, 0.01)
+	assert.InDelta(t, 130.0, format.TBR, 0.01)
+
+	// No averageBitrate: fall back to peak bitrate for audio-only.
+	f.AverageBitrate = 0
+	format = mapFormat(f)
+	assert.InDelta(t, 130.0, format.ABR, 0.01)
+}
+
 func TestParseMimeType(t *testing.T) {
 	ext, v, a := parseMimeType(`video/webm; codecs="vp9"`)
 	assert.Equal(t, "webm", ext)

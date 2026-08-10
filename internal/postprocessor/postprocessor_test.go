@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -246,6 +247,19 @@ func readArgs(t *testing.T, argsFile string) string {
 	return string(data)
 }
 
+func TestFFmpegArgPath(t *testing.T) {
+	assert.Equal(t, "normal.mp4", ffmpegArgPath("normal.mp4"))
+	assert.Equal(t, "/abs/path.mp4", ffmpegArgPath("/abs/path.mp4"))
+	assert.Equal(t, "-", ffmpegArgPath("-"))
+	assert.Equal(t, "", ffmpegArgPath(""))
+
+	// Leading-dash relative paths must not be passed through unchanged.
+	got := ffmpegArgPath("-Title [id].mp4")
+	assert.NotEqual(t, "-Title [id].mp4", got)
+	assert.False(t, strings.HasPrefix(got, "-"), "safe path must not start with '-'")
+	assert.True(t, strings.HasSuffix(got, "-Title [id].mp4") || strings.Contains(got, "-Title [id].mp4"))
+}
+
 func TestMergerQuietUsesNoStats(t *testing.T) {
 	tmpDir := t.TempDir()
 	ffmpeg, argsFile := mockFFmpeg(t, tmpDir)
@@ -265,6 +279,35 @@ func TestMergerQuietUsesNoStats(t *testing.T) {
 	assert.Contains(t, args, "-nostats")
 	assert.Contains(t, args, "error")
 	assert.NotContains(t, args, "-stats")
+}
+
+func TestMergerLeadingDashOutputPath(t *testing.T) {
+	// Custom -o templates (or pre-fix leftovers) can still produce a
+	// relative path starting with "-". Merger must pass a safe argv to ffmpeg.
+	tmpDir := t.TempDir()
+	ffmpeg, argsFile := mockFFmpeg(t, tmpDir)
+
+	input1 := filepath.Join(tmpDir, "video.mp4")
+	input2 := filepath.Join(tmpDir, "audio.m4a")
+	require.NoError(t, os.WriteFile(input1, []byte("video"), 0644))
+	require.NoError(t, os.WriteFile(input2, []byte("audio"), 0644))
+
+	// Run from tmpDir so relative dash-leading names resolve cleanly.
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tmpDir))
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+
+	m := NewMerger(ffmpeg)
+	m.Quiet = true
+	_, err = m.Run(context.Background(), []string{"video.mp4", "audio.m4a"}, "-Dash Title [id].mp4", "")
+	require.NoError(t, err)
+
+	args := readArgs(t, argsFile)
+	// The raw relative form must not appear as a bare argv starting with "-".
+	// mockFFmpeg joins args with spaces, so look for a safe absolute form.
+	assert.NotContains(t, " "+args, " -Dash Title [id].mp4")
+	assert.Contains(t, args, "Dash Title [id].mp4")
 }
 
 func TestMergerAutoFastStart_MP4(t *testing.T) {
@@ -385,4 +428,35 @@ func TestEmbedderAutoFastStart_MP4(t *testing.T) {
 	args := readArgs(t, argsFile)
 	assert.Contains(t, args, "-movflags")
 	assert.Contains(t, args, "+faststart")
+}
+
+func TestMergerRealFFmpegLeadingDashTitle(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	tmpDir := t.TempDir()
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tmpDir))
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+
+	// Tiny real media
+	run := func(args ...string) {
+		cmd := exec.Command("ffmpeg", append([]string{"-y", "-hide_banner", "-loglevel", "error"}, args...)...)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+	}
+	run("-f", "lavfi", "-i", "color=c=black:s=320x240:d=0.5", "-c:v", "libx264", "-pix_fmt", "yuv420p", "v.mp4")
+	run("-f", "lavfi", "-i", "sine=frequency=440:duration=0.5", "-c:a", "aac", "a.m4a")
+
+	// Pre-sanitize-style broken name (what used to be written to disk)
+	badOut := "-I Wouldn't Deny Him-- Following [fZHouoxG644].mp4"
+	m := NewMerger("ffmpeg")
+	m.Quiet = true
+	got, err := m.Run(context.Background(), []string{"v.mp4", "a.m4a"}, badOut, "")
+	require.NoError(t, err)
+	assert.Equal(t, badOut, got)
+	st, err := os.Stat(got)
+	require.NoError(t, err)
+	assert.Greater(t, st.Size(), int64(0))
 }

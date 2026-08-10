@@ -71,8 +71,11 @@ func sanitize(name string) string {
 	name = replacer.Replace(name)
 	// Prevent path traversal via ".." in titles/playlists (Issue 2).
 	name = strings.ReplaceAll(name, "..", "_")
-	// Trim leading/trailing dots, underscores, and spaces.
-	name = strings.Trim(name, ". _")
+	// Trim leading/trailing dots, dashes, underscores, and spaces.
+	// Restricted chars above become "-", so a title like `"Foo"| Bar` would
+	// otherwise become `-Foo-- Bar` and break tools (e.g. ffmpeg) that treat
+	// argv starting with "-" as options.
+	name = strings.Trim(name, ".-_ ")
 	return name
 }
 

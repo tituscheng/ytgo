@@ -69,6 +69,23 @@ func TestFFmpegDownloader_buildArgs_NoUserAgent(t *testing.T) {
 	assert.Contains(t, args, "mkv")
 }
 
+func TestFFmpegDestPath_LeadingDash(t *testing.T) {
+	assert.Equal(t, "/tmp/out.mp4", ffmpegDestPath("/tmp/out.mp4"))
+	assert.Equal(t, "out.mp4", ffmpegDestPath("out.mp4"))
+	assert.Equal(t, "-", ffmpegDestPath("-"))
+
+	got := ffmpegDestPath("-Title [id].mp4.part")
+	require.NotEqual(t, "-Title [id].mp4.part", got)
+	assert.False(t, strings.HasPrefix(got, "-"))
+	assert.Contains(t, got, "-Title [id].mp4.part")
+
+	fd := &FFmpegDownloader{Quiet: true}
+	args := fd.buildArgs("https://example.com/v.mpd", "-Dash.mp4")
+	last := args[len(args)-1]
+	assert.NotEqual(t, "-Dash.mp4", last)
+	assert.False(t, strings.HasPrefix(last, "-"))
+}
+
 func TestFFmpegDownloader_DownloadToFile_QuietCapturesStderr(t *testing.T) {
 	fd := &FFmpegDownloader{
 		Quiet: true,

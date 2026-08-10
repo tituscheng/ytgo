@@ -179,8 +179,21 @@ func (fd *FFmpegDownloader) buildArgs(url, destPath string) []string {
 	if format := outputFormat(destPath); format != "" {
 		args = append(args, "-f", format)
 	}
-	args = append(args, destPath)
+	// ffmpeg treats argv starting with "-" as options; make dest safe.
+	args = append(args, ffmpegDestPath(destPath))
 	return args
+}
+
+// ffmpegDestPath returns destPath in a form ffmpeg will not parse as an option.
+// Relative names like `-Title [id].mp4` become absolute (or "./…").
+func ffmpegDestPath(destPath string) string {
+	if destPath == "" || destPath == "-" || !strings.HasPrefix(destPath, "-") {
+		return destPath
+	}
+	if abs, err := filepath.Abs(destPath); err == nil {
+		return abs
+	}
+	return "./" + destPath
 }
 
 func (fd *FFmpegDownloader) ffmpegPath() string {

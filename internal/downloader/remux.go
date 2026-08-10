@@ -74,12 +74,12 @@ func RemuxMPEGTSToMP4(ctx context.Context, ffmpegPath, path string) error {
 		"-hide_banner",
 		"-loglevel", "error",
 		"-y",
-		"-i", path,
+		"-i", ffmpegDestPath(path),
 		"-c", "copy",
 		"-bsf:a", "aac_adtstoasc",
 		"-movflags", "+faststart",
 		"-f", "mp4",
-		tmpPath,
+		ffmpegDestPath(tmpPath),
 	}
 	cmd := exec.CommandContext(ctx, ffmpeg, args...)
 	var stderr bytes.Buffer

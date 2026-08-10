@@ -133,6 +133,20 @@ func ffmpegBaseArgs(quiet bool) []string {
 	return []string{"-y", "-loglevel", "warning", "-stats"}
 }
 
+// ffmpegArgPath returns a filesystem path safe to pass as an ffmpeg argv.
+// ffmpeg treats any argument starting with "-" as an option, so relative
+// outputs like `-Title [id].mp4` fail with "Unrecognized option". Absolute
+// paths (or "./…") avoid that. Empty and "-" (stdout) are returned unchanged.
+func ffmpegArgPath(p string) string {
+	if p == "" || p == "-" || !strings.HasPrefix(p, "-") {
+		return p
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return "./" + p
+}
+
 // isMP4Family reports whether the extension is an MP4/M4A/MOV container.
 func isMP4Family(ext string) bool {
 	switch strings.ToLower(strings.TrimPrefix(ext, ".")) {
@@ -195,7 +209,7 @@ func (m *Merger) Run(ctx context.Context, inputs []string, outputPath, forceExt 
 		args = append(args, "-progress", "pipe:1")
 	}
 	for _, in := range inputs {
-		args = append(args, "-i", in)
+		args = append(args, "-i", ffmpegArgPath(in))
 	}
 	args = append(args, "-c", "copy")
 	// Map all streams
@@ -206,7 +220,7 @@ func (m *Merger) Run(ctx context.Context, inputs []string, outputPath, forceExt 
 	if isMP4Family(ext) || isMP4Family(forceExt) {
 		args = append(args, "-movflags", "+faststart")
 	}
-	args = append(args, outputPath)
+	args = append(args, ffmpegArgPath(outputPath))
 
 	if err := runFFmpeg(ctx, m.ffmpeg, m.prefix, m.Quiet, m.Progress, args...); err != nil {
 		return "", fmt.Errorf("ffmpeg merge: %w", err)
@@ -275,7 +289,7 @@ func (c *Converter) ExtractAudio(ctx context.Context, input, audioFormat, qualit
 	if c.Progress != nil {
 		base = append(base, "-progress", "pipe:1")
 	}
-	args := append(base, "-i", input)
+	args := append(base, "-i", ffmpegArgPath(input))
 
 	// Audio codec selection
 	switch audioFormat {
@@ -304,7 +318,7 @@ func (c *Converter) ExtractAudio(ctx context.Context, input, audioFormat, qualit
 	if isMP4Family(ext) {
 		args = append(args, "-movflags", "+faststart")
 	}
-	args = append(args, output)
+	args = append(args, ffmpegArgPath(output))
 	if err := runFFmpeg(ctx, c.ffmpeg, c.prefix, c.Quiet, c.Progress, args...); err != nil {
 		removeFile(output)
 		return "", fmt.Errorf("ffmpeg convert: %w", err)
@@ -367,7 +381,7 @@ func (e *Embedder) Run(ctx context.Context, path string, info *extractor.VideoIn
 
 	// For mp4/m4a we can use atomicparsley or ffmpeg.
 	// ffmpeg -i input -c copy -metadata title="..." output
-	args := append(ffmpegBaseArgs(e.Quiet), "-i", path)
+	args := append(ffmpegBaseArgs(e.Quiet), "-i", ffmpegArgPath(path))
 
 	if opts.Metadata {
 		if info.Title != "" {
@@ -385,7 +399,7 @@ func (e *Embedder) Run(ctx context.Context, path string, info *extractor.VideoIn
 		thumbPath, err := e.downloadThumbnail(ctx, info.Thumbnails)
 		if err == nil {
 			defer removeFile(thumbPath)
-			args = append(args, "-i", thumbPath, "-map", "0", "-map", "1", "-c", "copy", "-disposition:v:1", "attached_pic")
+			args = append(args, "-i", ffmpegArgPath(thumbPath), "-map", "0", "-map", "1", "-c", "copy", "-disposition:v:1", "attached_pic")
 		}
 	}
 
@@ -394,7 +408,7 @@ func (e *Embedder) Run(ctx context.Context, path string, info *extractor.VideoIn
 		metaFile, err := writeChaptersMetadata(info.Chapters)
 		if err == nil {
 			defer removeFile(metaFile)
-			args = append(args, "-i", metaFile, "-map_metadata", "1")
+			args = append(args, "-i", ffmpegArgPath(metaFile), "-map_metadata", "1")
 		}
 	}
 
@@ -406,7 +420,7 @@ func (e *Embedder) Run(ctx context.Context, path string, info *extractor.VideoIn
 	// Need a temp output. Keep the original extension last so ffmpeg can
 	// auto-detect the output muxer (a bare ".tmp" suffix fails).
 	tmpPath := path + ".tmp" + filepath.Ext(path)
-	args = append(args, tmpPath)
+	args = append(args, ffmpegArgPath(tmpPath))
 
 	if err := runFFmpeg(ctx, e.ffmpeg, e.prefix, e.Quiet, nil, args...); err != nil {
 		removeFile(tmpPath)

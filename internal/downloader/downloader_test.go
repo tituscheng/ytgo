@@ -375,7 +375,7 @@ func TestDownloadToFilePartNaming(t *testing.T) {
 
 func TestStatusErrorUnwrap(t *testing.T) {
 	tests := []struct {
-		code   int
+		code     int
 		sentinel error
 	}{
 		{403, ErrForbidden},
@@ -441,4 +441,53 @@ func TestSegmentProgressTotal(t *testing.T) {
 	for _, tot := range totals {
 		assert.Equal(t, int64(len(content)), tot, "total should always be the full file size")
 	}
+}
+
+func TestSegmentProgressResumeSeedsCompletedBytes(t *testing.T) {
+	content := []byte("0123456789abcdef") // 16 bytes
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+			w.Header().Set("Accept-Ranges", "bytes")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		var start, end int
+		fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end)
+		if end >= len(content) {
+			end = len(content) - 1
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(content)))
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write(content[start : end+1])
+	}))
+	defer srv.Close()
+
+	dest := filepath.Join(t.TempDir(), "resume.bin")
+	// Plan would be 4-byte chunks: 0-3, 4-7, 8-11, 12-15. Pretend first two are done.
+	rs := &ResumeState{
+		URL:      srv.URL,
+		DestPath: dest,
+		FileSize: int64(len(content)),
+		Completed: []ByteRange{
+			{Index: 0, StartByte: 0, EndByte: 3},
+			{Index: 1, StartByte: 4, EndByte: 7},
+		},
+	}
+	require.NoError(t, os.WriteFile(dest, content[:8], 0o644))
+	require.NoError(t, rs.Save())
+
+	var firstDown int64 = -1
+	sd := NewSegmentDownloader(http.DefaultClient)
+	sd.Workers = 4
+	sd.ChunkSize = 4
+	sd.MaxChunkSize = 4
+	sd.Continue = true
+	sd.Progress = func(down, tot int64) {
+		if firstDown < 0 {
+			firstDown = down
+		}
+	}
+	require.NoError(t, sd.DownloadToFile(context.Background(), srv.URL, dest))
+	assert.GreaterOrEqual(t, firstDown, int64(8), "resume should start at already-completed bytes")
 }

@@ -9,7 +9,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
+
+	"github.com/tituscheng/ytgo/internal/ffprogress"
 )
 
 // ffmpegStreamMaxAttempts is how many times DownloadToFile will try a stream
@@ -32,8 +35,14 @@ type FFmpegDownloader struct {
 	// LogRetries prints one-line retry notices even when Quiet is set.
 	LogRetries bool
 	Progress   ProgressFunc
-	UserAgent  string
-	Headers    map[string]string
+	// Duration is the known media duration. When set, Progress reports
+	// (out_time_ms, duration_ms). Discovered from ffmpeg stderr if zero.
+	Duration time.Duration
+	// Filesize is a fallback Progress total when Duration is unknown
+	// (paired with ffmpeg total_size).
+	Filesize  int64
+	UserAgent string
+	Headers   map[string]string
 	// MaxAttempts overrides ffmpegStreamMaxAttempts when > 0 (tests / tuning).
 	MaxAttempts int
 	// RetryBase is the unit for linear backoff between attempts (1×, 2×, …).
@@ -99,12 +108,70 @@ func (fd *FFmpegDownloader) runOnce(ctx context.Context, ffmpeg, url, destPath s
 	// Always capture stderr so transient 5xx text is available for retry
 	// decisions. When Quiet is false, also mirror to the terminal (verbose).
 	var stderr bytes.Buffer
-	if fd.Quiet {
+	var totMs atomic.Int64
+	var lastCur atomic.Int64
+	if d := fd.Duration.Milliseconds(); d > 0 {
+		totMs.Store(d)
+	}
+
+	report := func(cur, tot int64) {
+		if fd.Progress != nil {
+			fd.Progress(cur, tot)
+		}
+	}
+
+	var stderrW io.Writer = &stderr
+	if fd.Progress != nil {
+		stderrW = io.MultiWriter(&stderr, &ffprogress.DurationWriter{
+			OnDuration: func(d time.Duration) {
+				ms := d.Milliseconds()
+				if ms <= 0 {
+					return
+				}
+				totMs.CompareAndSwap(0, ms)
+				if c := lastCur.Load(); c > 0 {
+					report(c, totMs.Load())
+				}
+			},
+		})
+	}
+	if !fd.Quiet {
+		stderrW = io.MultiWriter(os.Stderr, stderrW)
+	}
+	cmd.Stderr = stderrW
+
+	switch {
+	case fd.Progress != nil:
+		cmd.Stdout = &ffprogress.Parser{
+			OnOutTime: func(outMs int64) {
+				lastCur.Store(outMs)
+				t := totMs.Load()
+				if t > 0 {
+					report(outMs, t)
+					return
+				}
+				report(outMs, 0)
+			},
+			OnTotalSize: func(n int64) {
+				if totMs.Load() > 0 || fd.Filesize <= 0 {
+					return
+				}
+				report(n, fd.Filesize)
+			},
+			OnEnd: func() {
+				if t := totMs.Load(); t > 0 {
+					report(t, t)
+					return
+				}
+				if fd.Filesize > 0 {
+					report(fd.Filesize, fd.Filesize)
+				}
+			},
+		}
+	case fd.Quiet:
 		cmd.Stdout = nil
-		cmd.Stderr = &stderr
-	} else {
+	default:
 		cmd.Stdout = os.Stdout
-		cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
 	}
 
 	if err := cmd.Run(); err != nil {
@@ -112,6 +179,13 @@ func (fd *FFmpegDownloader) runOnce(ctx context.Context, ffmpeg, url, destPath s
 			return fmt.Errorf("ffmpeg stream download: %w: %s", err, msg)
 		}
 		return fmt.Errorf("ffmpeg stream download: %w", err)
+	}
+	if fd.Progress != nil {
+		if t := totMs.Load(); t > 0 {
+			report(t, t)
+		} else if fd.Filesize > 0 {
+			report(fd.Filesize, fd.Filesize)
+		}
 	}
 	return nil
 }
@@ -155,6 +229,9 @@ func (fd *FFmpegDownloader) buildArgs(url, destPath string) []string {
 		"-hide_banner",
 		"-loglevel", ffmpegLogLevel(fd.Quiet),
 		"-y",
+	}
+	if fd.Progress != nil {
+		args = append(args, "-progress", "pipe:1")
 	}
 	if len(fd.Headers) > 0 {
 		args = append(args, "-headers", formatFFmpegHeaders(fd.Headers))

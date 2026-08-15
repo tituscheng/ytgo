@@ -82,10 +82,10 @@ type DownloadOptions struct {
 	// Metadata enrichment (slower — makes secondary API calls)
 	EnrichMetadata bool `mapstructure:"enrich-metadata"`
 
-	// OnProgress receives structured progress events for every phase (download,
-	// merge, audio extraction). Library use only — not settable via CLI/config
-	// file. The engine serializes calls, so the callback need not be safe for
-	// concurrent use.
+	// OnProgress receives structured progress events. Fraction() is the
+	// video-wide 0–100% bar (including ffmpeg stages). Library use only —
+	// not settable via CLI/config file. The engine serializes calls, so the
+	// callback need not be safe for concurrent use.
 	OnProgress ytgo.ProgressFunc `mapstructure:"-"`
 
 	// OnError is called for every video that fails during processing.
@@ -122,8 +122,8 @@ func DefaultOptions() DownloadOptions {
 		PlaylistStart:       1,
 		ConcurrentFragments: 1,
 		SocketTimeout:       30 * time.Second,
-		MaxDownloads:      3,
-		MaxPostProcessors: 2,
+		MaxDownloads:        3,
+		MaxPostProcessors:   2,
 		AudioFormat:         "best",
 		AudioQuality:        "5",
 		FFmpegLocation:      "ffmpeg",

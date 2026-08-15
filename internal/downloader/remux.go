@@ -9,6 +9,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/tituscheng/ytgo/internal/ffprogress"
 )
 
 // MPEG-TS packets start with sync byte 0x47.
@@ -46,10 +49,17 @@ func wantsMP4Container(destPath string) bool {
 	}
 }
 
+// ShouldRemuxMPEGTS reports whether path is raw MPEG-TS that should be remuxed
+// into an MP4-family container.
+func ShouldRemuxMPEGTS(path string) bool {
+	return wantsMP4Container(path) && IsMPEGTSFile(path)
+}
+
 // RemuxMPEGTSToMP4 stream-copies an MPEG-TS file into a real MP4 at the same
 // path (atomic replace via temp file). Applies aac_adtstoasc and faststart.
 // No-op (nil error) when path is not MPEG-TS or does not want an MP4 container.
-func RemuxMPEGTSToMP4(ctx context.Context, ffmpegPath, path string) error {
+// progress, when non-nil, receives (out_time_ms, duration_ms).
+func RemuxMPEGTSToMP4(ctx context.Context, ffmpegPath, path string, progress ProgressFunc, duration time.Duration) error {
 	if path == "" || !wantsMP4Container(path) {
 		return nil
 	}
@@ -74,16 +84,32 @@ func RemuxMPEGTSToMP4(ctx context.Context, ffmpegPath, path string) error {
 		"-hide_banner",
 		"-loglevel", "error",
 		"-y",
+	}
+	if progress != nil {
+		args = append(args, "-progress", "pipe:1")
+	}
+	args = append(args,
 		"-i", ffmpegDestPath(path),
 		"-c", "copy",
 		"-bsf:a", "aac_adtstoasc",
 		"-movflags", "+faststart",
 		"-f", "mp4",
 		ffmpegDestPath(tmpPath),
-	}
+	)
 	cmd := exec.CommandContext(ctx, ffmpeg, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+	if progress != nil {
+		tot := duration.Milliseconds()
+		cmd.Stdout = &ffprogress.Parser{
+			OnOutTime: func(outMs int64) { progress(outMs, tot) },
+			OnEnd: func() {
+				if tot > 0 {
+					progress(tot, tot)
+				}
+			},
+		}
+	}
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg != "" {

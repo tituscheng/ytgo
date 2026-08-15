@@ -58,7 +58,7 @@ Both paths converge on `core.Engine.Run()`, which is the single entry point for 
 **Why a separate package?** `pkg/` is the conventional Go location for public library surface. Internal packages can still change; `pkg/ytgo/api` is the stability contract.
 
 **Callbacks:** The API exposes two lifecycle hooks on `DownloadOptions`:
-- `OnProgress` — structured `ytgo.Progress` events for every phase (download, merge, audio). Carries `VideoID`/`Phase`/`FormatID`; use `Progress.Fraction()` for a unit-independent ratio. Serialized by the engine, so the callback need not be concurrency-safe.
+- `OnProgress` — structured `ytgo.Progress` events for the whole video. Engine events set `HasOverall`; `Progress.Fraction()` is the single 0–100% bar from first byte through FFmpeg merge/remux/audio/embed. `Phase` is only a label; `Cur`/`Tot` stay phase-local. The CLI spinner prints the same `Fraction()`. Serialized by the engine, so the callback need not be concurrency-safe. `--quiet` / `--no-progress` hide the spinner only.
 - `OnError` — structured failure report for every video that fails (playlist-safe)
 
 **Playlist Report:** `Engine.Run()` returns a `*ytgo.PlaylistReport` for playlist URLs containing `Total`, `Succeeded`, `Skipped`, and `Failed` counts.
@@ -67,7 +67,7 @@ Both paths converge on `core.Engine.Run()`, which is the single entry point for 
 
 ### 3. Engine Layer (`internal/core/`)
 
-**File:** `internal/core/engine.go`
+**Files:** `engine.go`, `progress.go`, `ui.go`
 
 The `Engine` struct is the orchestrator. It owns:
 
@@ -193,7 +193,7 @@ Returns a slice of `extractor.Format` to download. The engine downloads each for
 
 ### 6. Download Layer (`internal/downloader/`)
 
-**Files:** `downloader.go`, `segment.go`, `planner.go`, `resume.go`, `ffmpeg.go`
+**Files:** `downloader.go`, `segment.go`, `planner.go`, `resume.go`, `ffmpeg.go`, `remux.go`, `hlsfrag/`
 
 A segmented HTTP downloader with **resume support**, **bounded chunk sizes**, optional **concurrent segment fetching**, and an **FFmpeg adaptive path** for HLS/DASH manifests.
 
@@ -215,7 +215,7 @@ The engine chooses between the segment downloader and `FFmpegDownloader` in `dow
 
 Media CDN requests use a browser User-Agent injected via `transport.WithHeaders` in `NewEngine`. Innertube API calls use separate client UAs.
 
-**Progress reporting:** The downloader's low-level `Progress func(down, total int64)` reports bytes for one stream. The engine translates these into structured `ytgo.Progress` events (one per `FormatID`, all sharing the video's `VideoID`) and forwards them through the serialized `Engine.reportProgress`. Per-video aggregation across formats is left to the consumer; ffmpeg merge/audio phases report through the same path using `-progress pipe:1` output measured against the media duration.
+**Progress reporting:** Low-level downloaders still report phase-local `(cur, tot)` — bytes for HTTP/HLS, media milliseconds for FFmpeg (`-progress pipe:1`). A per-video `progressTracker` in `internal/core/progress.go` maps those samples onto one monotonic `[0,1]` using planned stage weights (download gets the majority; merge/remux/audio/embed take small reserved slices). Every emit is one `ytgo.Progress` value: `reportProgress` (library) and the spinner suffix both use `p.Fraction()`. Resume seeds the HTTP byte counter so a partial file does not restart the bar at 0%. Unknown totals (`Fraction() == -1`) stay indeterminate rather than inventing a percent. Live streams with no duration stay indeterminate.
 
 - **Bounded chunks:** All requests use `Range: bytes=N-M` with a maximum chunk size of ~10 MB. YouTube's CDN throttles unbounded ranges (`bytes=0-`) to ~32 KB/s on some videos.
 - **Segmented downloads:** Files are split into chunks. With `Workers > 1`, chunks are downloaded concurrently via `errgroup.Group`. With `Workers == 1`, chunks are downloaded sequentially.
@@ -252,6 +252,7 @@ All post-processors accept the path to the `ffmpeg` binary via `config.FFmpegLoc
 
 | Package | Responsibility |
 |---|---|
+| `internal/ffprogress` | Shared parser for ffmpeg `-progress pipe:1` (`out_time_us`, `total_size`, `Duration:` from stderr) |
 | `internal/config` | `DownloadOptions` struct with `mapstructure` tags for viper unmarshalling |
 | `internal/cleanup` | Temp file tracker with guaranteed cleanup on defer |
 | `internal/archive` | Plain-text ID archive (one video ID per line) |

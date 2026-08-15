@@ -35,6 +35,26 @@ func TestFFmpegDownloader_buildArgs_UserAgent(t *testing.T) {
 	assert.Equal(t, "1", args[indexOf(args, "-http_multiple")+1])
 }
 
+func TestFFmpegDownloader_buildArgs_ProgressFlag(t *testing.T) {
+	fd := &FFmpegDownloader{
+		Quiet:    true,
+		Progress: func(down, tot int64) {},
+	}
+	args := fd.buildArgs("https://example.com/playlist.m3u8", "/tmp/out.mp4")
+	assert.Contains(t, args, "-progress")
+	idx := indexOf(args, "-progress")
+	require.GreaterOrEqual(t, idx, 0)
+	assert.Equal(t, "pipe:1", args[idx+1])
+	// Must precede -i so ffmpeg treats it as a global option.
+	assert.Less(t, idx, indexOf(args, "-i"))
+}
+
+func TestFFmpegDownloader_buildArgs_NoProgressFlagByDefault(t *testing.T) {
+	fd := &FFmpegDownloader{Quiet: true}
+	args := fd.buildArgs("https://example.com/playlist.m3u8", "/tmp/out.mp4")
+	assert.NotContains(t, args, "-progress")
+}
+
 func TestFFmpegDownloader_buildArgs_NonHLS_NoSmartOpts(t *testing.T) {
 	fd := &FFmpegDownloader{Quiet: true}
 	args := fd.buildArgs("https://example.com/video.mpd", "/tmp/out.mkv")

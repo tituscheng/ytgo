@@ -34,7 +34,7 @@ If you need sponsorblock, 1000+ site extractors, or `--cookies-from-browser`, yt
 - **Cloudflare Stream extraction** — direct URLs, embed JS links, customer subdomains, HLS variants, DASH fallback, optional direct MP4, and subtitle tracks from the master playlist
 - **Format selection** with yt-dlp-style selectors (`bv*+ba/best`, `best[height<=720]`, `hls-720p`, itag, extension)
 - **Format preferences** — type-safe codec/container scoring (`PreferVideoCodec: "avc1"`) instead of regex DSL
-- **HTTP download** with bounded chunk segmentation (~10 MB), concurrent workers, resume support, and progress spinners
+- **HTTP download** with bounded chunk segmentation (~10 MB), concurrent workers, resume support, and a single 0–100% progress bar (CLI and `OnProgress` share `Fraction()`, including FFmpeg merge/remux/audio/embed)
 - **Adaptive stream download** via FFmpeg for HLS/DASH manifests (YouTube live replays, Rumble, Cloudflare Stream)
 - **Post-processing** via FFmpeg: merge, audio extraction (`-x`), metadata/thumbnail/chapter embedding. Safe concurrent execution (`--max-postprocessors`) with non-interleaved output and proper context cancellation.
 - **Subtitles & Metadata Extraction**: Production-grade retry with exponential backoff + jitter for both subtitle tracks and core Innertube metadata extraction (Player/Playlist). Server `Retry-After` honored where applicable, atomic side-file writes, and structured failure reporting.
@@ -164,7 +164,9 @@ opts.FormatFilter = func(f ytgo.Format) bool {
 ## Progress Callback
 
 Instead of parsing yt-dlp's `[download] X.X%` stdout lines, ytgo exposes a single
-structured callback that covers every phase — download, merge, and audio extraction:
+structured callback. `Fraction()` is the **video-wide** bar — one 0–100% pass from
+the first byte through merge, remux, audio extract, and embed. The CLI spinner
+prints that same `Fraction()`; do not re-aggregate.
 
 ```go
 opts := api.DefaultOptions()
@@ -177,20 +179,18 @@ err := api.Download(ctx, url, opts)
 ```
 
 `Progress.Fraction()` returns completion in `[0,1]`, or `-1` when the total isn't
-known yet (render an indeterminate indicator rather than a bar). `Cur`/`Tot` are
-opaque units that depend on the phase — bytes for `PhaseDownload`, milliseconds of
-media time for `PhaseMerge` and `PhaseAudio` — but most consumers only need
-`Fraction()` and `Phase`.
+known yet (render an indeterminate indicator rather than a bar). `Phase` is only
+a label for the current stage. `Cur`/`Tot` stay phase-local (bytes for download,
+milliseconds of media time for ffmpeg stages) for advanced consumers.
 
 The engine **serializes** calls to `OnProgress`, so your callback does not need to
 be safe for concurrent use even during concurrent playlist downloads or
-post-processing.
+post-processing. `--quiet` / `--no-progress` hide the spinner only; `OnProgress`
+still fires.
 
-Identity is carried on every event: for multi-format downloads (`bv+ba`) you get one
-event per `FormatID`, all sharing the same `VideoID` — aggregate by `VideoID` if you
-want a single per-video number. When downloading with concurrent segment workers
-(`Workers > 1`), download events report global byte progress against the full file
-size, not per-segment totals.
+Each video in a playlist is its own 0–100%. Multi-format downloads (`bv+ba`) share
+one bar. Concurrent segment workers report global byte progress against the full
+file size, not per-segment totals.
 
 ---
 
@@ -384,7 +384,9 @@ sub-langs:
 | `internal/extractor/youtube/innertube` | Direct YouTube Innertube API client (ANDROID_VR / WEB_EMBEDDED_PLAYER) |
 | `internal/extractor/cloudflarestream` | Cloudflare Stream URL parsing, HLS/DASH format extraction |
 | `internal/transport` | Tuned HTTP transport and header injection for media CDN requests |
+| `internal/core` | Engine: format download, weighted video-wide progress, post-process orchestration |
 | `internal/downloader` | HTTP download with bounded chunk segmentation, concurrent workers, resume, FFmpeg adaptive downloads, and live-replay routing |
+| `internal/ffprogress` | Shared parser for ffmpeg `-progress pipe:1` (out_time / duration) |
 | `internal/limiter` | Global rate limiter for downloads |
 | `internal/pipeline` | Concurrent worker pool for extract/postprocess |
 | `internal/format` | Format selection DSL parser |
@@ -430,7 +432,7 @@ func main() {
 ```go
 opts := api.DefaultOptions()
 opts.OnProgress = func(p ytgo.Progress) {
-    // Emit p.Phase / p.Title / p.Fraction() to your UI framework (Wails, Fyne, etc.)
+    // p.Fraction() is the same 0–100% the CLI spinner shows.
 }
 err := api.Download(ctx, url, opts)
 ```

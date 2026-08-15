@@ -62,32 +62,49 @@ func (e *Engine) reportProgress(p ytgo.Progress) {
 	e.Config.OnProgress(p)
 }
 
-// ffmpegProgress builds the callback handed to a post-processor for a given
-// phase. It forwards ffmpeg's out_time (ms) as structured Progress events
-// (against the known media duration) and updates the status spinner. It
-// returns nil when nothing would consume progress, leaving the ffmpeg
-// invocation unchanged in that case.
-func (e *Engine) ffmpegProgress(info *extractor.VideoInfo, phase ytgo.Phase, label string, s *spinner.Spinner) func(outMs int64) {
-	if e.Config.OnProgress == nil && s == nil {
-		return nil
-	}
-	totMs := info.Duration.Milliseconds()
-	return func(outMs int64) {
-		e.reportProgress(ytgo.Progress{
-			VideoID: info.ID,
-			Title:   info.Title,
-			Phase:   phase,
-			Cur:     outMs,
-			Tot:     totMs,
-		})
-		if s != nil && totMs > 0 {
-			pct := float64(outMs) / float64(totMs) * 100
-			if pct > 100 {
-				pct = 100
+// newVideoProgress builds the per-video tracker that feeds both OnProgress
+// and the terminal spinner from the same ytgo.Progress value.
+func (e *Engine) newVideoProgress(info *extractor.VideoInfo, selected []extractor.Format, isStdout bool) *progressTracker {
+	needMerge := len(selected) > 1 || e.Config.MergeOutputFormat != "" || isStdout
+	needAudio := e.Config.ExtractAudio
+	needEmbed := e.Config.EmbedMetadata || e.Config.EmbedThumbnail || e.Config.EmbedSubs || e.Config.EmbedChapters
+	needRemux := false
+	if info != nil && !info.IsLiveContent {
+		for _, f := range selected {
+			u, isManifest := resolveDownloadURL(info, f)
+			if isManifest && strings.Contains(strings.ToLower(u), ".m3u8") {
+				needRemux = true
+				break
 			}
-			s.Suffix = fmt.Sprintf("  %s (%.1f%%)", label, pct)
 		}
 	}
+	audioCopy := e.Config.AudioFormat == "" || e.Config.AudioFormat == "best"
+	plan := trackerPlan{
+		VideoID:   info.ID,
+		Title:     info.Title,
+		Formats:   selected,
+		NeedRemux: needRemux,
+		NeedMerge: needMerge,
+		NeedAudio: needAudio,
+		AudioCopy: audioCopy,
+		NeedEmbed: needEmbed,
+	}
+
+	tr := newProgressTracker(plan, e.reportProgress)
+	if !e.Config.Quiet && !e.Config.NoProgress {
+		s := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
+		s.Suffix = formatProgressSuffix(ytgo.Progress{
+			Phase:      ytgo.PhaseDownload,
+			HasOverall: true,
+			Overall:    -1,
+		}, defaultPhaseLabel(ytgo.PhaseDownload))
+		s.Start()
+		tr.spin = s
+		tr.paint = func(p ytgo.Progress) {
+			s.Suffix = formatProgressSuffix(p, defaultPhaseLabel(p.Phase))
+		}
+	}
+	return tr
 }
 
 // NewEngine builds an Engine with default YouTube support.
@@ -203,7 +220,7 @@ func (e *Engine) runVideo(ctx context.Context, info *extractor.VideoInfo, arch *
 
 // downloadVideo handles archive check, format selection, and downloading.
 // It returns a videoTask for post-processing, or nil if the video was skipped.
-func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, arch *archive.Archive) (*videoTask, error) {
+func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, arch *archive.Archive) (task *videoTask, err error) {
 	isStdout := e.Config.OutputTemplate == "-"
 	if isStdout {
 		e.Config.NoProgress = true
@@ -286,6 +303,12 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 	}
 
 	downloaded := make([]string, len(selected))
+	tr := e.newVideoProgress(info, selected, isStdout)
+	defer func() {
+		if err != nil {
+			tr.stop()
+		}
+	}()
 
 	if len(selected) == 1 {
 		partPath := outputPath + ".part"
@@ -296,7 +319,7 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 			temps.Push(partPath)
 			temps.Push(finalPath)
 		}
-		used, err := e.downloadSingleFormatResilient(ctx, info, selected[0], partPath)
+		used, err := e.downloadSingleFormatResilient(ctx, info, selected[0], partPath, tr)
 		if err != nil {
 			e.reportFailure(ytgo.DownloadFailure{
 				VideoID:   info.ID,
@@ -341,7 +364,7 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 			}
 			// total>1 enables line-based ↓/✓/✗ status (same as concurrent UI,
 			// but streams run serially so CDN is not double-opened).
-			used, err := e.downloadFormatToFile(ctx, info, f, partPath, i+1, len(selected))
+			used, err := e.downloadFormatToFile(ctx, info, f, partPath, i+1, len(selected), tr)
 			if err != nil {
 				summary := downloader.SummarizeStreamError(err)
 				e.reportFailure(ytgo.DownloadFailure{
@@ -394,7 +417,7 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 					temps.Push(partPath)
 					temps.Push(finalPath)
 				}
-				used, err := e.downloadFormatToFile(gctx, info, f, partPath, i+1, len(selected))
+				used, err := e.downloadFormatToFile(gctx, info, f, partPath, i+1, len(selected), tr)
 				if err != nil {
 					summary := downloader.SummarizeStreamError(err)
 					e.reportFailure(ytgo.DownloadFailure{
@@ -442,7 +465,7 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 		}
 	}
 
-	return &videoTask{info: info, outputPath: outputPath, downloaded: downloaded}, nil
+	return &videoTask{info: info, outputPath: outputPath, downloaded: downloaded, progress: tr}, nil
 }
 
 // postProcessVideo handles merge, convert, embed, side files, and archive.
@@ -458,19 +481,19 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 		slog.Bool("extract_audio", e.Config.ExtractAudio),
 		slog.Bool("embed", e.Config.EmbedThumbnail || e.Config.EmbedMetadata))
 
+	tr := task.progress
+	if tr != nil {
+		defer tr.stop()
+		tr.closeDownloadPhase()
+	}
+
 	finalPath := outputPath
 	if len(downloaded) > 1 || e.Config.MergeOutputFormat != "" || isStdout {
 		merger := e.makeMerger(info)
-		var mergeSpinner *spinner.Spinner
-		if !e.Config.Quiet && !e.Config.NoProgress {
-			mergeSpinner = newStatusSpinner("[merge] Merging video and audio...")
-			mergeSpinner.Start()
+		if tr != nil {
+			merger.Progress = tr.stageCB(stageMerge, ytgo.PhaseMerge, info.Duration.Milliseconds())
 		}
-		merger.Progress = e.ffmpegProgress(info, ytgo.PhaseMerge, "[merge] Merging video and audio", mergeSpinner)
 		merged, err := merger.Run(ctx, downloaded, outputPath, e.Config.MergeOutputFormat)
-		if mergeSpinner != nil {
-			mergeSpinner.Stop()
-		}
 		if err != nil {
 			summary := downloader.SummarizeStreamError(err)
 			e.reportFailure(ytgo.DownloadFailure{
@@ -483,6 +506,9 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 			return fmt.Errorf("merge failed: %s", summary)
 		}
 		finalPath = merged
+		if tr != nil {
+			tr.completeStage(stageMerge)
+		}
 		for _, p := range downloaded {
 			if p != finalPath {
 				e.cleanupFile(p)
@@ -496,16 +522,10 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 	// reported via ffmpeg's -progress output against the known media duration.
 	if e.Config.ExtractAudio {
 		conv := e.makeConverter(info)
-		var convertSpinner *spinner.Spinner
-		if !e.Config.Quiet && !e.Config.NoProgress {
-			convertSpinner = newStatusSpinner("[info] Extracting audio...")
-			convertSpinner.Start()
+		if tr != nil {
+			conv.Progress = tr.stageCB(stageAudio, ytgo.PhaseAudio, info.Duration.Milliseconds())
 		}
-		conv.Progress = e.ffmpegProgress(info, ytgo.PhaseAudio, "[info] Extracting audio", convertSpinner)
 		converted, err := conv.ExtractAudio(ctx, finalPath, e.Config.AudioFormat, e.Config.AudioQuality)
-		if convertSpinner != nil {
-			convertSpinner.Stop()
-		}
 		if err != nil {
 			e.reportFailure(ytgo.DownloadFailure{
 				VideoID:   info.ID,
@@ -520,6 +540,9 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 			e.cleanupFile(finalPath)
 		}
 		finalPath = converted
+		if tr != nil {
+			tr.completeStage(stageAudio)
+		}
 	}
 
 	if e.Config.EmbedMetadata || e.Config.EmbedThumbnail || e.Config.EmbedSubs || e.Config.EmbedChapters {
@@ -529,6 +552,9 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 			embedClient = &http.Client{Transport: e.Transport, Timeout: 30 * time.Second}
 		}
 		embedder := e.makeEmbedder(info, embedClient)
+		if tr != nil {
+			embedder.Progress = tr.stageCB(stageEmbed, ytgo.PhaseEmbed, info.Duration.Milliseconds())
+		}
 		if err := embedder.Run(ctx, finalPath, info, postprocessor.EmbedOptions{
 			Metadata:  e.Config.EmbedMetadata,
 			Thumbnail: e.Config.EmbedThumbnail,
@@ -544,6 +570,9 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 			})
 			return fmt.Errorf("embed failed: %w", err)
 		}
+		if tr != nil {
+			tr.completeStage(stageEmbed)
+		}
 	}
 
 	// Write side files
@@ -557,6 +586,10 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 	// Record in archive
 	if arch != nil {
 		_ = arch.Add(info.ID)
+	}
+
+	if tr != nil {
+		tr.finish()
 	}
 
 	if isStdout {
@@ -581,6 +614,7 @@ type videoTask struct {
 	info       *extractor.VideoInfo
 	outputPath string
 	downloaded []string
+	progress   *progressTracker
 }
 
 func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) (*ytgo.PlaylistReport, error) {
@@ -748,8 +782,8 @@ func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) (*y
 // a fresh URL for the same FormatID, then (for generic selectors like ba/best)
 // tries same-class alternate formats. The returned Format is the one that
 // actually landed on disk.
-func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.VideoInfo, f extractor.Format, dest string, current, total int) (extractor.Format, error) {
-	return e.downloadFormatToFileInner(ctx, info, f, dest, current, total, true)
+func (e *Engine) downloadFormatToFile(ctx context.Context, info *extractor.VideoInfo, f extractor.Format, dest string, current, total int, tr *progressTracker) (extractor.Format, error) {
+	return e.downloadFormatToFileInner(ctx, info, f, dest, current, total, true, tr)
 }
 
 func (e *Engine) downloadFormatToFileInner(
@@ -759,6 +793,7 @@ func (e *Engine) downloadFormatToFileInner(
 	dest string,
 	current, total int,
 	allowAlt bool,
+	tr *progressTracker,
 ) (extractor.Format, error) {
 	e.log("starting format download",
 		slog.String("video_id", info.ID),
@@ -766,17 +801,11 @@ func (e *Engine) downloadFormatToFileInner(
 		slog.String("dest", dest),
 		slog.Int64("filesize", f.Filesize))
 
-	// For concurrent downloads (total > 1), use line-based status messages to
-	// avoid spinner interleaving on stderr.
+	// For concurrent downloads (total > 1), use line-based status messages
+	// alongside the single video-wide spinner.
 	concurrent := total > 1
 	label := formatStreamLabel(f)
-	var s *spinner.Spinner
-	if !concurrent && !e.Config.Quiet && !e.Config.NoProgress {
-		s = spinner.New(spinner.CharSets[14], 100*time.Millisecond)
-		s.Suffix = fmt.Sprintf("  [download] Downloading %s...", label)
-		s.Start()
-		defer s.Stop()
-	} else if concurrent && !e.Config.Quiet {
+	if concurrent && !e.Config.Quiet {
 		printDownloading(label)
 	}
 
@@ -784,6 +813,10 @@ func (e *Engine) downloadFormatToFileInner(
 	// structured progress events stay accurate for consumers.
 	progressFormatID := f.FormatID
 	progressCb := func(down, tot int64) {
+		if tr != nil {
+			tr.setDownload(progressFormatID, down, tot)
+			return
+		}
 		e.reportProgress(ytgo.Progress{
 			VideoID:  info.ID,
 			Title:    info.Title,
@@ -792,14 +825,10 @@ func (e *Engine) downloadFormatToFileInner(
 			Cur:      down,
 			Tot:      tot,
 		})
-		if s != nil && tot > 0 {
-			pct := float64(down) / float64(tot) * 100
-			s.Suffix = fmt.Sprintf("  [download] Downloading %s (%.1f%%)", label, pct)
-		}
 	}
 
 	used := f
-	err := e.downloadFormatOnce(ctx, info, f, dest, progressCb)
+	err := e.downloadFormatOnce(ctx, info, f, dest, progressCb, tr)
 	if err != nil && isForbidden(err) {
 		if !e.Config.Quiet {
 			printRetry("URL expired (403), re-extracting...")
@@ -816,7 +845,7 @@ func (e *Engine) downloadFormatToFileInner(
 						slog.String("video_id", info.ID),
 						slog.String("format_id", f.FormatID))
 					clearPartialDownload(dest)
-					err = e.downloadFormatOnce(ctx, fresh, freshFormat, dest, progressCb)
+					err = e.downloadFormatOnce(ctx, fresh, freshFormat, dest, progressCb, tr)
 					if err == nil {
 						used = freshFormat
 					}
@@ -851,7 +880,10 @@ func (e *Engine) downloadFormatToFileInner(
 				clearPartialDownload(dest)
 				progressFormatID = alt.FormatID
 				label = formatStreamLabel(alt)
-				altErr := e.downloadFormatOnce(ctx, working, alt, dest, progressCb)
+				if tr != nil {
+					tr.aliasFormat(f.FormatID, alt.FormatID)
+				}
+				altErr := e.downloadFormatOnce(ctx, working, alt, dest, progressCb, tr)
 				if altErr == nil {
 					used = alt
 					err = nil
@@ -883,6 +915,9 @@ func (e *Engine) downloadFormatToFileInner(
 	if err != nil {
 		return f, err
 	}
+	if tr != nil {
+		tr.completeDownload(progressFormatID)
+	}
 	return used, nil
 }
 
@@ -893,6 +928,7 @@ func (e *Engine) downloadFormatOnce(
 	f extractor.Format,
 	dest string,
 	progressCb downloader.ProgressFunc,
+	tr *progressTracker,
 ) error {
 	clen := downloader.ParseContentLengthFromURL(f.URL)
 	if clen <= 0 {
@@ -911,7 +947,7 @@ func (e *Engine) downloadFormatOnce(
 		Progress: progressCb,
 		Limiter:  e.Downloader.Limiter,
 	}
-	return e.downloadFormatURL(ctx, info, f, dest, d, progressCb)
+	return e.downloadFormatURL(ctx, info, f, dest, d, progressCb, tr)
 }
 
 // clearPartialDownload removes a failed partial so the next attempt starts clean.
@@ -927,6 +963,7 @@ func (e *Engine) downloadFormatURL(
 	dest string,
 	d *downloader.Downloader,
 	progressCb downloader.ProgressFunc,
+	tr *progressTracker,
 ) error {
 	url, isManifest := resolveDownloadURL(info, f)
 	if isManifest {
@@ -937,7 +974,7 @@ func (e *Engine) downloadFormatURL(
 		// multi-connection pressure triggers 503/504 — so fall back after a
 		// short cool-down (Quiet keeps ffmpeg stderr out of the UI).
 		if strings.Contains(strings.ToLower(url), ".m3u8") && !info.IsLiveContent {
-			if err := e.hlsFragDownload(ctx, info, url, dest, progressCb); err == nil {
+			if err := e.hlsFragDownload(ctx, info, url, dest, progressCb, tr); err == nil {
 				return nil
 			} else if ctx.Err() != nil {
 				// Don't fall back to FFmpeg after user cancel / deadline.
@@ -961,13 +998,13 @@ func (e *Engine) downloadFormatURL(
 				}
 			}
 		}
-		return e.ffmpegDownloader(progressCb, ffmpegDownloadHeaders(info, url)).DownloadToFile(ctx, url, dest)
+		return e.ffmpegDownloader(progressCb, ffmpegDownloadHeaders(info, url), info, f).DownloadToFile(ctx, url, dest)
 	}
 
 	err := d.DownloadToFile(ctx, url, dest)
 	if err != nil && info.IsLiveContent {
 		if fallback := manifestFormat(info); fallback != nil {
-			return e.ffmpegDownloader(progressCb, ffmpegDownloadHeaders(info, fallback.URL)).DownloadToFile(ctx, fallback.URL, dest)
+			return e.ffmpegDownloader(progressCb, ffmpegDownloadHeaders(info, fallback.URL), info, *fallback).DownloadToFile(ctx, fallback.URL, dest)
 		}
 	}
 	return err
@@ -981,6 +1018,7 @@ func (e *Engine) hlsFragDownload(
 	info *extractor.VideoInfo,
 	playlistURL, dest string,
 	progressCb downloader.ProgressFunc,
+	tr *progressTracker,
 ) error {
 	headers := ffmpegDownloadHeaders(info, playlistURL)
 	if headers == nil {
@@ -1026,13 +1064,13 @@ func (e *Engine) hlsFragDownload(
 	}
 	// Classic MPEG-TS HLS (e.g. some Dailymotion VODs) concatenates to a
 	// transport stream. Remux to a real MP4 when the output name promises one.
-	return e.remuxNativeHLSIfMPEGTS(ctx, dest)
+	return e.remuxNativeHLSIfMPEGTS(ctx, dest, info, tr)
 }
 
 // remuxNativeHLSIfMPEGTS turns raw TS fragment concat into a proper MP4 when
 // dest is named *.mp4 (or *.part of one). No-op for fMP4 native downloads.
-func (e *Engine) remuxNativeHLSIfMPEGTS(ctx context.Context, dest string) error {
-	if !downloader.IsMPEGTSFile(dest) {
+func (e *Engine) remuxNativeHLSIfMPEGTS(ctx context.Context, dest string, info *extractor.VideoInfo, tr *progressTracker) error {
+	if !downloader.ShouldRemuxMPEGTS(dest) {
 		return nil
 	}
 	if !e.Config.Quiet {
@@ -1040,15 +1078,28 @@ func (e *Engine) remuxNativeHLSIfMPEGTS(ctx context.Context, dest string) error 
 	}
 	e.log("remuxing native HLS MPEG-TS to MP4",
 		slog.String("dest", dest))
-	if err := downloader.RemuxMPEGTSToMP4(ctx, e.Config.FFmpegLocation, dest); err != nil {
+	var progress downloader.ProgressFunc
+	var dur time.Duration
+	if info != nil {
+		dur = info.Duration
+	}
+	if tr != nil {
+		progress = func(cur, totn int64) {
+			tr.setStage(stageRemux, ytgo.PhaseRemux, cur, totn)
+		}
+	}
+	if err := downloader.RemuxMPEGTSToMP4(ctx, e.Config.FFmpegLocation, dest, progress, dur); err != nil {
 		return err
+	}
+	if tr != nil {
+		tr.completeStage(stageRemux)
 	}
 	return nil
 }
 
-func (e *Engine) ffmpegDownloader(progressCb downloader.ProgressFunc, headers map[string]string) *downloader.FFmpegDownloader {
+func (e *Engine) ffmpegDownloader(progressCb downloader.ProgressFunc, headers map[string]string, info *extractor.VideoInfo, f extractor.Format) *downloader.FFmpegDownloader {
 	// Always Quiet: never stream raw ffmpeg logs. Retry notices only with -v.
-	return &downloader.FFmpegDownloader{
+	fd := &downloader.FFmpegDownloader{
 		FFmpegPath: e.Config.FFmpegLocation,
 		Quiet:      true,
 		LogRetries: e.Config.Verbose && !e.Config.Quiet,
@@ -1056,6 +1107,11 @@ func (e *Engine) ffmpegDownloader(progressCb downloader.ProgressFunc, headers ma
 		UserAgent:  innertube.WebUserAgent,
 		Headers:    headers,
 	}
+	if info != nil {
+		fd.Duration = info.Duration
+	}
+	fd.Filesize = f.Filesize
+	return fd
 }
 
 // dailymotionMediaUA matches the browser profile yt-dlp uses for DM CDN GETs.
@@ -1084,8 +1140,9 @@ func (e *Engine) downloadSingleFormatResilient(
 	info *extractor.VideoInfo,
 	f extractor.Format,
 	dest string,
+	tr *progressTracker,
 ) (extractor.Format, error) {
-	used, err := e.downloadFormatToFile(ctx, info, f, dest, 1, 1)
+	used, err := e.downloadFormatToFile(ctx, info, f, dest, 1, 1, tr)
 	if err == nil {
 		return used, nil
 	}
@@ -1126,7 +1183,7 @@ func (e *Engine) downloadSingleFormatResilient(
 		clearNativeHLSPartial(dest)
 		// Skip nested progressive 403 alt ladder during DM CDN retries; the
 		// muxed HLS quality ladder below is the intended recovery path.
-		used, last = e.downloadFormatToFileInner(ctx, fresh, *matched, dest, 1, 1, false)
+		used, last = e.downloadFormatToFileInner(ctx, fresh, *matched, dest, 1, 1, false, tr)
 		if last == nil {
 			return used, nil
 		}
@@ -1152,7 +1209,7 @@ func (e *Engine) downloadSingleFormatResilient(
 				downloader.SummarizeStreamError(last), alt.FormatID))
 		}
 		clearNativeHLSPartial(dest)
-		used, last = e.downloadFormatToFileInner(ctx, working, alt, dest, 1, 1, false)
+		used, last = e.downloadFormatToFileInner(ctx, working, alt, dest, 1, 1, false, tr)
 		if last == nil {
 			return used, nil
 		}

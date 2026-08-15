@@ -12,6 +12,7 @@ This document captures the next major features and improvements for ytgo. Each i
 | Go-native `FormatFilter` func | ✅ Done | — |
 | Auto-faststart for MP4/M4A outputs | ✅ Done | — |
 | Structured `OnProgress` callback with multi-format aggregation | ✅ Done | — |
+| Unified 0–100% video progress (CLI + library, including FFmpeg stages) | ✅ Done | — |
 | `api.GetStreamURL()` with rich metadata & preferences | ✅ Done | — |
 | Opt-in metadata enrichment (`--enrich-metadata`) for likes | ✅ Done | — |
 

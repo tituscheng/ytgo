@@ -120,6 +120,9 @@ func (sd *SegmentDownloader) DownloadToFile(ctx context.Context, url, destPath s
 		// and is the expected size. The file may have been renamed or deleted
 		// since the resume state was last written (e.g., worker crash).
 		if fileSize(destPath) >= totalSize {
+			if sd.Progress != nil {
+				sd.Progress(totalSize, totalSize)
+			}
 			return rs.Remove()
 		}
 		// Stale resume state — file missing or incomplete. Reset and re-download.
@@ -149,8 +152,21 @@ func (sd *SegmentDownloader) DownloadToFile(ctx context.Context, url, destPath s
 	}
 	defer fd.Close()
 
-	// Atomic progress tracking
+	// Atomic progress tracking. Seed with bytes already on disk so resume
+	// reports (completed/total), not a 0→remaining/total climb.
+	var missingBytes int64
+	for _, seg := range missing {
+		missingBytes += seg.Size()
+	}
+	var completedBytes int64
+	if totalSize > missingBytes {
+		completedBytes = totalSize - missingBytes
+	}
 	var downloaded atomic.Int64
+	downloaded.Store(completedBytes)
+	if sd.Progress != nil && completedBytes > 0 {
+		sd.Progress(completedBytes, sd.totalSize)
+	}
 
 	if sd.Workers <= 1 {
 		// Sequential download

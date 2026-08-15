@@ -10,6 +10,7 @@ import (
 	"github.com/fatih/color"
 
 	"github.com/tituscheng/ytgo/internal/extractor"
+	"github.com/tituscheng/ytgo/pkg/ytgo"
 )
 
 // Bracketed status tags for user-facing lines (yt-dlp style).
@@ -47,6 +48,35 @@ func newStatusSpinner(suffix string) *spinner.Spinner {
 	s := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
 	s.Suffix = "  " + suffix
 	return s
+}
+
+// formatProgressSuffix is the only place the terminal turns a Progress event
+// into a percent string. It must use p.Fraction() so the CLI matches OnProgress.
+func formatProgressSuffix(p ytgo.Progress, label string) string {
+	if label == "" {
+		label = defaultPhaseLabel(p.Phase)
+	}
+	if f := p.Fraction(); f >= 0 {
+		return fmt.Sprintf("  [%s] %s (%.1f%%)", p.Phase, label, f*100)
+	}
+	return fmt.Sprintf("  [%s] %s...", p.Phase, label)
+}
+
+func defaultPhaseLabel(phase ytgo.Phase) string {
+	switch phase {
+	case ytgo.PhaseDownload:
+		return "Downloading"
+	case ytgo.PhaseMerge:
+		return "Merging video and audio"
+	case ytgo.PhaseAudio:
+		return "Extracting audio"
+	case ytgo.PhaseEmbed:
+		return "Embedding metadata"
+	case ytgo.PhaseRemux:
+		return "Remuxing"
+	default:
+		return string(phase)
+	}
 }
 
 // printTagged writes one user-facing line: [tag] message

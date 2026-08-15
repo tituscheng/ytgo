@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/tituscheng/ytgo/internal/extractor"
+	"github.com/tituscheng/ytgo/internal/ffprogress"
 )
 
 // PostProcessor is implemented by every post-processor stage.
@@ -64,7 +65,7 @@ func runFFmpeg(ctx context.Context, ffmpeg string, prefix string, quiet bool, on
 	var stdoutBuf bytes.Buffer
 	switch {
 	case onProgress != nil:
-		cmd.Stdout = &progressParser{cb: onProgress}
+		cmd.Stdout = ffprogress.NewParser(onProgress)
 	case prefix == "" && !quiet:
 		cmd.Stdout = os.Stdout
 	default:
@@ -93,37 +94,6 @@ func runFFmpeg(ctx context.Context, ffmpeg string, prefix string, quiet bool, on
 		}
 	}
 	return err
-}
-
-// progressParser is an io.Writer that scans ffmpeg `-progress pipe:1` output
-// (newline-separated key=value pairs) and invokes cb with the most recent
-// out_time, in milliseconds. Partial lines are buffered across writes.
-type progressParser struct {
-	buf []byte
-	cb  func(outMs int64)
-}
-
-func (p *progressParser) Write(b []byte) (int, error) {
-	p.buf = append(p.buf, b...)
-	for {
-		i := bytes.IndexByte(p.buf, '\n')
-		if i < 0 {
-			break
-		}
-		line := p.buf[:i]
-		p.buf = p.buf[i+1:]
-		key, val, ok := bytes.Cut(line, []byte{'='})
-		if !ok {
-			continue
-		}
-		// out_time_us is microseconds of media processed so far.
-		if string(bytes.TrimSpace(key)) == "out_time_us" {
-			if us, err := strconv.ParseInt(string(bytes.TrimSpace(val)), 10, 64); err == nil && us >= 0 {
-				p.cb(us / 1000)
-			}
-		}
-	}
-	return len(b), nil
 }
 
 func ffmpegBaseArgs(quiet bool) []string {
@@ -160,7 +130,7 @@ func isMP4Family(ext string) bool {
 type Merger struct {
 	ffmpeg string
 	prefix string // non-empty only when concurrent post-processing is enabled (prevents interleaving)
-	Quiet  bool    // suppress ffmpeg progress output (library / --quiet mode)
+	Quiet  bool   // suppress ffmpeg progress output (library / --quiet mode)
 	// Progress, when set, receives the media time processed so far (ms).
 	// Enabling it adds `-progress pipe:1` to the ffmpeg invocation.
 	Progress func(outMs int64)
@@ -347,6 +317,9 @@ type Embedder struct {
 	client *http.Client // optional; if set, used for thumbnail downloads (shares tuned transport)
 	prefix string
 	Quiet  bool
+	// Progress, when set, receives the media time processed so far (ms).
+	// Enabling it adds `-progress pipe:1` to the ffmpeg invocation.
+	Progress func(outMs int64)
 }
 
 // NewEmbedder creates an Embedder using a default short-lived HTTP client for thumbnails.
@@ -381,7 +354,11 @@ func (e *Embedder) Run(ctx context.Context, path string, info *extractor.VideoIn
 
 	// For mp4/m4a we can use atomicparsley or ffmpeg.
 	// ffmpeg -i input -c copy -metadata title="..." output
-	args := append(ffmpegBaseArgs(e.Quiet), "-i", ffmpegArgPath(path))
+	args := ffmpegBaseArgs(e.Quiet)
+	if e.Progress != nil {
+		args = append(args, "-progress", "pipe:1")
+	}
+	args = append(args, "-i", ffmpegArgPath(path))
 
 	if opts.Metadata {
 		if info.Title != "" {
@@ -422,7 +399,7 @@ func (e *Embedder) Run(ctx context.Context, path string, info *extractor.VideoIn
 	tmpPath := path + ".tmp" + filepath.Ext(path)
 	args = append(args, ffmpegArgPath(tmpPath))
 
-	if err := runFFmpeg(ctx, e.ffmpeg, e.prefix, e.Quiet, nil, args...); err != nil {
+	if err := runFFmpeg(ctx, e.ffmpeg, e.prefix, e.Quiet, e.Progress, args...); err != nil {
 		removeFile(tmpPath)
 		return fmt.Errorf("ffmpeg embed: %w", err)
 	}

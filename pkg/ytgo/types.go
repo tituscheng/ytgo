@@ -53,20 +53,20 @@ type Chapter struct {
 
 // VideoInfo holds all metadata for a video or playlist entry.
 type VideoInfo struct {
-	ID          string        `json:"id"`
-	Title       string        `json:"title"`
-	Description string        `json:"description,omitempty"`
-	Uploader    string        `json:"uploader,omitempty"`
-	UploaderID  string        `json:"uploader_id,omitempty"`
-	Channel     string        `json:"channel,omitempty"`
-	ChannelID   string        `json:"channel_id,omitempty"`
-	UploadDate  string        `json:"upload_date,omitempty"`
-	Duration    time.Duration `json:"duration,omitempty"`
-	ViewCount   int64         `json:"view_count,omitempty"`
-	LikeCount   int64         `json:"like_count,omitempty"`
-	WebpageURL  string        `json:"webpage_url,omitempty"`
-	OriginalURL string        `json:"original_url,omitempty"`
-	IsLiveContent bool        `json:"is_live_content,omitempty"`
+	ID            string        `json:"id"`
+	Title         string        `json:"title"`
+	Description   string        `json:"description,omitempty"`
+	Uploader      string        `json:"uploader,omitempty"`
+	UploaderID    string        `json:"uploader_id,omitempty"`
+	Channel       string        `json:"channel,omitempty"`
+	ChannelID     string        `json:"channel_id,omitempty"`
+	UploadDate    string        `json:"upload_date,omitempty"`
+	Duration      time.Duration `json:"duration,omitempty"`
+	ViewCount     int64         `json:"view_count,omitempty"`
+	LikeCount     int64         `json:"like_count,omitempty"`
+	WebpageURL    string        `json:"webpage_url,omitempty"`
+	OriginalURL   string        `json:"original_url,omitempty"`
+	IsLiveContent bool          `json:"is_live_content,omitempty"`
 
 	Formats       []Format              `json:"formats"`
 	Thumbnails    []Thumbnail           `json:"thumbnails,omitempty"`
@@ -94,30 +94,48 @@ const (
 	PhaseMerge    Phase = "merge"    // muxing separate audio/video tracks
 	PhaseAudio    Phase = "audio"    // extracting/transcoding audio
 	PhaseEmbed    Phase = "embed"    // embedding metadata/thumbnail/subs
+	PhaseRemux    Phase = "remux"    // MPEG-TS → MP4 remux after native HLS
 )
 
 // Progress reports the advancement of one processing phase for one video.
 //
-// Cur and Tot are opaque units that depend on Phase (bytes for PhaseDownload,
-// milliseconds of media time for the ffmpeg phases). Consumers that only want
-// a progress bar should use Fraction and ignore the raw units. Tot is <= 0 when
-// the total is not yet known.
+// Cur and Tot are opaque phase-local units (bytes for PhaseDownload,
+// milliseconds of media time for the ffmpeg phases). Tot is <= 0 when the
+// phase total is not yet known.
 //
-// During concurrent or multi-format work the same VideoID is reported across
-// several events (one per FormatID for downloads, one per phase otherwise);
-// aggregate by VideoID if a single per-video number is desired.
+// When HasOverall is true (engine-emitted events), Fraction returns the
+// video-wide bar in [0,1] — one pass from first byte through the last ffmpeg
+// stage, never resetting. Overall is -1 when the total is unknown (render an
+// indeterminate indicator). Cur/Tot remain available for advanced consumers.
+//
+// Events constructed without HasOverall keep the historical Cur/Tot Fraction
+// behavior.
 type Progress struct {
-	VideoID  string
-	Title    string
-	Phase    Phase
-	FormatID string // set for PhaseDownload; empty otherwise
-	Cur      int64
-	Tot      int64
+	VideoID    string
+	Title      string
+	Phase      Phase
+	FormatID   string // set for PhaseDownload; empty otherwise
+	Cur        int64
+	Tot        int64
+	Overall    float64 // video-wide [0,1] or -1 when unknown; valid when HasOverall
+	HasOverall bool
 }
 
 // Fraction returns completion in the range [0,1], or -1 when the total is
 // unknown (in which case render an indeterminate indicator rather than a bar).
+//
+// Engine events set HasOverall so this is the single start-to-finish bar
+// (including merge/audio/embed/remux). Otherwise Cur/Tot are used.
 func (p Progress) Fraction() float64 {
+	if p.HasOverall {
+		if p.Overall < 0 {
+			return -1
+		}
+		if p.Overall > 1 {
+			return 1
+		}
+		return p.Overall
+	}
 	if p.Tot <= 0 {
 		return -1
 	}

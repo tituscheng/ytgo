@@ -318,6 +318,55 @@ func TestEngineRun_DownloadWithProgress(t *testing.T) {
 	assert.Equal(t, int64(len(content)), finalTot, "total bytes should match content size")
 }
 
+func TestEngineRun_ProgressOverallEndsAtOne(t *testing.T) {
+	content := []byte("fake video content for overall progress")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		w.Header().Set("Accept-Ranges", "bytes")
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	tmpDir := t.TempDir()
+	info := &ytgo.VideoInfo{
+		ID:    "ov1",
+		Title: "Overall",
+		Formats: []ytgo.Format{
+			{FormatID: "1", URL: srv.URL, Ext: "mp4", HasVideo: true, HasAudio: true, Filesize: int64(len(content))},
+		},
+	}
+
+	var fracs []float64
+	cfg := config.DownloadOptions{
+		OutputTemplate: "%(title)s [%(id)s].%(ext)s",
+		Paths:          tmpDir,
+		NoProgress:     true,
+		OnProgress: func(p ytgo.Progress) {
+			assert.True(t, p.HasOverall, "engine events must set HasOverall")
+			fracs = append(fracs, p.Fraction())
+		},
+	}
+	eng := NewEngine(cfg)
+	eng.Register(&mockExtractor{info: info})
+
+	_, err := eng.Run(context.Background(), "http://example.com")
+	require.NoError(t, err)
+	require.NotEmpty(t, fracs)
+	var last float64 = -2
+	for _, f := range fracs {
+		if f < 0 {
+			continue
+		}
+		assert.GreaterOrEqual(t, f, last)
+		last = f
+	}
+	assert.InDelta(t, 1.0, fracs[len(fracs)-1], 1e-9)
+}
+
 func TestEngineRun_EnrichMetadata(t *testing.T) {
 	tmpDir := t.TempDir()
 	info := &ytgo.VideoInfo{
@@ -674,10 +723,10 @@ func TestResolveDownloadURL(t *testing.T) {
 	}
 
 	tests := []struct {
-		name      string
-		info      *ytgo.VideoInfo
-		format    ytgo.Format
-		wantURL   string
+		name       string
+		info       *ytgo.VideoInfo
+		format     ytgo.Format
+		wantURL    string
 		wantFFmpeg bool
 	}{
 		{

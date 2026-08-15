@@ -36,7 +36,7 @@ func TestRemuxMPEGTSToMP4_NoopWhenNotTS(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "x.mp4")
 	require.NoError(t, os.WriteFile(path, []byte{0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p'}, 0o644))
-	require.NoError(t, RemuxMPEGTSToMP4(context.Background(), "", path))
+	require.NoError(t, RemuxMPEGTSToMP4(context.Background(), "", path, nil, 0))
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, byte('f'), data[4])
@@ -65,7 +65,7 @@ exit 0
 	require.NoError(t, os.WriteFile(path, []byte{0x47, 0x00, 0x00, 0x00, 0x01}, 0o644))
 	require.True(t, IsMPEGTSFile(path))
 
-	err := RemuxMPEGTSToMP4(context.Background(), script, path)
+	err := RemuxMPEGTSToMP4(context.Background(), script, path, nil, 0)
 	require.NoError(t, err)
 	assert.False(t, IsMPEGTSFile(path), "after remux should not be MPEG-TS")
 	data, err := os.ReadFile(path)
@@ -77,7 +77,7 @@ func TestRemuxMPEGTSToMP4_NoopWrongExt(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "out.ts")
 	require.NoError(t, os.WriteFile(path, []byte{0x47, 0x00}, 0o644))
-	require.NoError(t, RemuxMPEGTSToMP4(context.Background(), "", path))
+	require.NoError(t, RemuxMPEGTSToMP4(context.Background(), "", path, nil, 0))
 	// Unchanged TS.
 	assert.True(t, IsMPEGTSFile(path))
 }
@@ -90,7 +90,7 @@ func TestRemuxMPEGTSToMP4_MissingFFmpeg(t *testing.T) {
 	// Isolate from system ffmpeg by prepending an empty bin dir and using a
 	// preferred path that does not exist.
 	t.Setenv("PATH", dir)
-	err := RemuxMPEGTSToMP4(context.Background(), filepath.Join(dir, "no-such-ffmpeg"), path)
+	err := RemuxMPEGTSToMP4(context.Background(), filepath.Join(dir, "no-such-ffmpeg"), path, nil, 0)
 	require.Error(t, err)
 	assert.Contains(t, strings.ToLower(err.Error()), "ffmpeg")
 }

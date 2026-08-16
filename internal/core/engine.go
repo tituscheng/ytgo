@@ -394,6 +394,9 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 			downloaded[i] = finalPath
 		}
 		if len(failParts) > 0 {
+			if task, ok := e.fallbackMuxedProgressive(ctx, info, outputPath, selected, failParts, isStdout, &temps, tr); ok {
+				return task, nil
+			}
 			return nil, fmt.Errorf("download failed: %s", strings.Join(failParts, "; "))
 		}
 	} else {
@@ -458,6 +461,10 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 			failMu.Lock()
 			parts := append([]string(nil), failParts...)
 			failMu.Unlock()
+			// Use the parent ctx: gctx is already canceled by the failed stream.
+			if task, ok := e.fallbackMuxedProgressive(ctx, info, outputPath, selected, parts, isStdout, &temps, tr); ok {
+				return task, nil
+			}
 			if len(parts) > 0 {
 				return nil, fmt.Errorf("download failed: %s", strings.Join(parts, "; "))
 			}
@@ -1306,6 +1313,141 @@ func alternateFormatsAfterForbidden(primary extractor.Format, all []extractor.Fo
 // best-first so a failed 140 still tries 251/249/139.
 func isClearlyHigherQuality(primary, cand extractor.Format) bool {
 	return primary.Height > 0 && cand.Height > primary.Height
+}
+
+// muxedProgressiveFallback picks a single A+V progressive stream after
+// ANDROID_VR adaptive HTTPS itags (137+140, …) return 403. YouTube now
+// requires a GVS PO token for those adaptive formats; muxed itag 18 still
+// works without one (yt-dlp #17348, 2026-08). Prefer 18; otherwise the
+// best remaining muxed progressive URL.
+func muxedProgressiveFallback(formats []extractor.Format) *extractor.Format {
+	var eighteen *extractor.Format
+	var best *extractor.Format
+	for i := range formats {
+		f := &formats[i]
+		if !isMuxedProgressive(*f) {
+			continue
+		}
+		if f.FormatID == "18" {
+			eighteen = f
+		}
+		if betterMuxedProgressive(f, best) {
+			best = f
+		}
+	}
+	if eighteen != nil {
+		return eighteen
+	}
+	return best
+}
+
+func isMuxedProgressive(f extractor.Format) bool {
+	if strings.TrimSpace(f.URL) == "" {
+		return false
+	}
+	if f.FormatID == "hls" || f.FormatID == "dash" || downloader.IsStreamManifest(f.URL) {
+		return false
+	}
+	return f.HasVideo && f.HasAudio
+}
+
+func betterMuxedProgressive(a, best *extractor.Format) bool {
+	if best == nil {
+		return true
+	}
+	if a.Height != best.Height {
+		return a.Height > best.Height
+	}
+	return a.Filesize > best.Filesize
+}
+
+func failureLooksForbidden(parts []string) bool {
+	for _, p := range parts {
+		if strings.Contains(p, "403") || strings.Contains(strings.ToLower(p), "forbidden") {
+			return true
+		}
+	}
+	return false
+}
+
+// fallbackMuxedProgressive downloads itag 18 (or another muxed progressive)
+// after a bv+ba pair dies on HTTP 403. The canceled gctx must not be used.
+func (e *Engine) fallbackMuxedProgressive(
+	ctx context.Context,
+	info *extractor.VideoInfo,
+	outputPath string,
+	failed []extractor.Format,
+	failParts []string,
+	isStdout bool,
+	temps *cleanup.Stack,
+	tr *progressTracker,
+) (*videoTask, bool) {
+	if ctx.Err() != nil || !allowsQualityLadderFallback(e.Config.Format) || !failureLooksForbidden(failParts) {
+		return nil, false
+	}
+	muxed := muxedProgressiveFallback(info.Formats)
+	if muxed == nil {
+		return nil, false
+	}
+	for _, f := range failed {
+		if f.FormatID == muxed.FormatID {
+			return nil, false
+		}
+	}
+
+	if !e.Config.Quiet {
+		printRetry(fmt.Sprintf("HTTP 403 on adaptive streams; falling back to muxed %s…", muxed.FormatID))
+	}
+	e.log("403 recovery: muxed progressive fallback",
+		slog.String("video_id", info.ID),
+		slog.String("format_id", muxed.FormatID),
+		slog.String("from", strings.Join(failParts, "; ")))
+
+	partPath := outputPath + ".part"
+	finalPath := outputPath
+	if isStdout {
+		partPath = filepath.Join(os.TempDir(), filepath.Base(finalPath)) + ".part"
+		finalPath = filepath.Join(os.TempDir(), filepath.Base(finalPath))
+		temps.Push(partPath)
+		temps.Push(finalPath)
+	}
+
+	if _, err := e.downloadFormatToFile(ctx, info, *muxed, partPath, 1, 1, tr); err != nil {
+		e.log("403 recovery: muxed progressive fallback failed",
+			slog.String("video_id", info.ID),
+			slog.String("format_id", muxed.FormatID),
+			slog.String("error", downloader.SummarizeStreamError(err)))
+		return nil, false
+	}
+	if err := renamePartFile(partPath, finalPath); err != nil {
+		return nil, false
+	}
+	if isStdout {
+		temps.Pop()
+		temps.Pop()
+	}
+	e.cleanupAdaptivePartials(outputPath, failed)
+	return &videoTask{
+		info:       info,
+		outputPath: outputPath,
+		downloaded: []string{finalPath},
+		progress:   tr,
+	}, true
+}
+
+func (e *Engine) cleanupAdaptivePartials(outputPath string, selected []extractor.Format) {
+	base := strings.TrimSuffix(outputPath, filepath.Ext(outputPath))
+	for _, f := range selected {
+		ext := f.Ext
+		if ext == "" {
+			ext = "mp4"
+		}
+		stem := fmt.Sprintf("%s.f%s.%s", base, f.FormatID, ext)
+		e.cleanupFile(stem)
+		e.cleanupFile(stem + ".part")
+		e.cleanupFile(stem + ".part.segments")
+		e.cleanupFile(stem + ".segments")
+	}
 }
 
 func isCombinedOrManifest(f extractor.Format) bool {

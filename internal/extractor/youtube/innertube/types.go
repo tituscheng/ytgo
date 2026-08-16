@@ -1,6 +1,10 @@
 // Package innertube provides a minimal, zero-dependency client for YouTube's
 // private Innertube API. It targets the ANDROID_VR client which returns
 // pre-decrypted URLs without requiring JavaScript execution.
+//
+// As of 2026-08 (yt-dlp #17348), ANDROID_VR adaptive HTTPS itags (137, 140, …)
+// need a GVS PO token or they 403. Muxed itag 18 still works without one.
+// Engine falls back to that muxed progressive stream after a 403.
 package innertube
 
 // PlayerRequest is the JSON body sent to /youtubei/v1/player.

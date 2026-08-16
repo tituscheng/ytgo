@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -554,6 +555,82 @@ func TestAlternateFormatsAfterForbidden(t *testing.T) {
 		require.Len(t, alts, 1)
 		assert.Equal(t, "135", alts[0].FormatID)
 	})
+}
+
+func TestMuxedProgressiveFallbackPrefersItag18(t *testing.T) {
+	got := muxedProgressiveFallback([]ytgo.Format{
+		{FormatID: "137", HasVideo: true, HasAudio: false, Height: 1080, URL: "https://example.com/137"},
+		{FormatID: "140", HasVideo: false, HasAudio: true, URL: "https://example.com/140"},
+		{FormatID: "22", HasVideo: true, HasAudio: true, Height: 720, URL: "https://example.com/22"},
+		{FormatID: "18", HasVideo: true, HasAudio: true, Height: 360, URL: "https://example.com/18"},
+		{FormatID: "hls", HasVideo: true, HasAudio: true, URL: "https://example.com/master.m3u8"},
+	})
+	require.NotNil(t, got)
+	assert.Equal(t, "18", got.FormatID)
+}
+
+func TestMuxedProgressiveFallbackWithout18(t *testing.T) {
+	got := muxedProgressiveFallback([]ytgo.Format{
+		{FormatID: "137", HasVideo: true, HasAudio: false, Height: 1080, URL: "https://example.com/137"},
+		{FormatID: "22", HasVideo: true, HasAudio: true, Height: 720, URL: "https://example.com/22"},
+		{FormatID: "17", HasVideo: true, HasAudio: true, Height: 144, URL: "https://example.com/17"},
+	})
+	require.NotNil(t, got)
+	assert.Equal(t, "22", got.FormatID)
+}
+
+func TestFailureLooksForbidden(t *testing.T) {
+	assert.True(t, failureLooksForbidden([]string{"140: HTTP 403", "137: context canceled"}))
+	assert.False(t, failureLooksForbidden([]string{"140: HTTP 503"}))
+	assert.False(t, failureLooksForbidden(nil))
+}
+
+func TestEngineRun_YouTube403FallsBackToItag18(t *testing.T) {
+	muxed := []byte("itag18-muxed-body")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/18"):
+			w.Header().Set("Accept-Ranges", "bytes")
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(muxed)))
+			if r.Method == http.MethodHead {
+				return
+			}
+			w.Write(muxed)
+		default:
+			http.Error(w, "forbidden", http.StatusForbidden)
+		}
+	}))
+	defer srv.Close()
+
+	tmpDir := t.TempDir()
+	info := &ytgo.VideoInfo{
+		ID:          "Fs94gyQPtSo",
+		Title:       "Part 2",
+		OriginalURL: "https://www.youtube.com/watch?v=Fs94gyQPtSo",
+		WebpageURL:  "https://www.youtube.com/watch?v=Fs94gyQPtSo",
+		Formats: []ytgo.Format{
+			{FormatID: "137", URL: srv.URL + "/137", Ext: "mp4", Height: 1080, HasVideo: true, HasAudio: false, Filesize: 1000},
+			{FormatID: "140", URL: srv.URL + "/140", Ext: "m4a", HasVideo: false, HasAudio: true, Filesize: 200},
+			{FormatID: "18", URL: srv.URL + "/18", Ext: "mp4", Height: 360, HasVideo: true, HasAudio: true, Filesize: int64(len(muxed))},
+		},
+	}
+	cfg := config.DownloadOptions{
+		Format:         "bv*+ba/best",
+		OutputTemplate: "%(title)s [%(id)s].%(ext)s",
+		Paths:          tmpDir,
+		NoProgress:     true,
+		Quiet:          true,
+	}
+	eng := NewEngine(cfg)
+	eng.Register(&mockExtractor{info: info})
+
+	_, err := eng.Run(context.Background(), info.OriginalURL)
+	require.NoError(t, err)
+
+	out := filepath.Join(tmpDir, "Part 2 [Fs94gyQPtSo].mp4")
+	data, err := os.ReadFile(out)
+	require.NoError(t, err)
+	assert.Equal(t, muxed, data)
 }
 
 func indexOfID(formats []ytgo.Format, id string) int {

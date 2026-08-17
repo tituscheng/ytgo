@@ -1316,10 +1316,10 @@ func isClearlyHigherQuality(primary, cand extractor.Format) bool {
 }
 
 // muxedProgressiveFallback picks a single A+V progressive stream after
-// ANDROID_VR adaptive HTTPS itags (137+140, …) return 403. YouTube now
-// requires a GVS PO token for those adaptive formats; muxed itag 18 still
-// works without one (yt-dlp #17348, 2026-08). Prefer 18; otherwise the
-// best remaining muxed progressive URL.
+// ANDROID_VR adaptive HTTPS itags (137+140, …) return 403. Extraction now
+// prefers VISIONOS adaptive streams so this is a last-resort safety net
+// (yt-dlp #17348 / #17261). Prefer 18; otherwise the best remaining muxed
+// progressive URL.
 func muxedProgressiveFallback(formats []extractor.Format) *extractor.Format {
 	var eighteen *extractor.Format
 	var best *extractor.Format

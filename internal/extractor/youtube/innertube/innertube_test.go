@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,14 +41,14 @@ func buildPlayerResponse(status, reason string) map[string]any {
 		"streamingData": map[string]any{
 			"formats": []map[string]any{
 				{
-					"itag":        18,
-					"url":         "https://example.com/video.mp4",
-					"mimeType":    "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"",
-					"bitrate":     500000,
-					"width":       640,
-					"height":      360,
-					"fps":         30,
-					"quality":     "medium",
+					"itag":          18,
+					"url":           "https://example.com/video.mp4",
+					"mimeType":      "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"",
+					"bitrate":       500000,
+					"width":         640,
+					"height":        360,
+					"fps":           30,
+					"quality":       "medium",
 					"audioChannels": 2,
 				},
 			},
@@ -84,20 +86,25 @@ func TestPlayer_Success(t *testing.T) {
 }
 
 func TestPlayer_AgeRestrictedFallback(t *testing.T) {
+	var mu sync.Mutex
 	callCount := 0
+	seen := map[string]int{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
 		var req PlayerRequest
 		json.NewDecoder(r.Body).Decode(&req)
+		mu.Lock()
+		callCount++
+		seen[req.Context.Client.ClientName]++
+		mu.Unlock()
 
-		if req.Context.Client.ClientName == "ANDROID_VR" {
-			resp := buildPlayerResponse("LOGIN_REQUIRED", "Sign in to confirm your age")
+		if req.Context.Client.ClientName == "WEB_EMBEDDED_PLAYER" {
+			resp := buildPlayerResponse("OK", "")
 			body, _ := json.Marshal(resp)
 			w.Write(body)
 			return
 		}
 
-		resp := buildPlayerResponse("OK", "")
+		resp := buildPlayerResponse("LOGIN_REQUIRED", "Sign in to confirm your age")
 		body, _ := json.Marshal(resp)
 		w.Write(body)
 	}))
@@ -108,7 +115,82 @@ func TestPlayer_AgeRestrictedFallback(t *testing.T) {
 
 	resp, err := client.Player(context.Background(), "dQw4w9WgXcQ")
 	require.NoError(t, err)
-	assert.Equal(t, 2, callCount)
+	assert.Equal(t, 3, callCount)
+	assert.Equal(t, 1, seen["ANDROID_VR"])
+	assert.Equal(t, 1, seen["VISIONOS"])
+	assert.Equal(t, 1, seen["WEB_EMBEDDED_PLAYER"])
+	assert.Equal(t, "Test Video", resp.VideoDetails.Title)
+}
+
+func TestPlayer_VisionOSAdaptivePreferred(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req PlayerRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		resp := buildPlayerResponse("OK", "")
+		switch req.Context.Client.ClientName {
+		case "ANDROID_VR":
+			resp["streamingData"] = map[string]any{
+				"formats": []map[string]any{
+					{"itag": 18, "url": "https://vr.example/18", "mimeType": `video/mp4`},
+				},
+				"adaptiveFormats": []map[string]any{
+					{"itag": 137, "url": "https://vr.example/137", "mimeType": `video/mp4`},
+					{"itag": 140, "url": "https://vr.example/140", "mimeType": `audio/mp4`},
+				},
+			}
+		case "VISIONOS":
+			resp["streamingData"] = map[string]any{
+				"adaptiveFormats": []map[string]any{
+					{"itag": 399, "url": "https://vis.example/399", "mimeType": `video/mp4`},
+					{"itag": 251, "url": "https://vis.example/251", "mimeType": `audio/webm`},
+				},
+			}
+		}
+		body, _ := json.Marshal(resp)
+		w.Write(body)
+	}))
+	defer server.Close()
+
+	client := NewClient(10 * time.Second)
+	client.HTTPClient.Transport = &testTransport{server: server}
+
+	resp, err := client.Player(context.Background(), "dQw4w9WgXcQ")
+	require.NoError(t, err)
+	require.Len(t, resp.StreamingData.Formats, 1)
+	assert.Equal(t, 18, resp.StreamingData.Formats[0].ItagNo)
+	var itags []int
+	for _, f := range resp.StreamingData.AdaptiveFormats {
+		itags = append(itags, f.ItagNo)
+	}
+	assert.ElementsMatch(t, []int{399, 251}, itags)
+}
+
+func TestPlayer_TVFallbackWhenBothUnplayable(t *testing.T) {
+	var mu sync.Mutex
+	seen := map[string]int{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req PlayerRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		mu.Lock()
+		seen[req.Context.Client.ClientName]++
+		mu.Unlock()
+		status := "UNPLAYABLE"
+		if req.Context.Client.ClientName == "TVHTML5" {
+			status = "OK"
+		}
+		body, _ := json.Marshal(buildPlayerResponse(status, "This video is made for kids"))
+		w.Write(body)
+	}))
+	defer server.Close()
+
+	client := NewClient(10 * time.Second)
+	client.HTTPClient.Transport = &testTransport{server: server}
+
+	resp, err := client.Player(context.Background(), "dQw4w9WgXcQ")
+	require.NoError(t, err)
+	assert.Equal(t, 1, seen["ANDROID_VR"])
+	assert.Equal(t, 1, seen["VISIONOS"])
+	assert.Equal(t, 1, seen["TVHTML5"])
 	assert.Equal(t, "Test Video", resp.VideoDetails.Title)
 }
 
@@ -174,18 +256,18 @@ func TestPlaylist_SingleColumn(t *testing.T) {
 												"contents": []map[string]any{
 													{
 														"playlistVideoRenderer": map[string]any{
-															"videoId":       "vid1",
-															"title":         map[string]any{"runs": []map[string]any{{"text": "Video 1"}}},
+															"videoId":         "vid1",
+															"title":           map[string]any{"runs": []map[string]any{{"text": "Video 1"}}},
 															"shortBylineText": map[string]any{"runs": []map[string]any{{"text": "Author 1"}}},
-															"lengthSeconds": "120",
+															"lengthSeconds":   "120",
 														},
 													},
 													{
 														"playlistVideoRenderer": map[string]any{
-															"videoId":       "vid2",
-															"title":         map[string]any{"runs": []map[string]any{{"text": "Video 2"}}},
+															"videoId":         "vid2",
+															"title":           map[string]any{"runs": []map[string]any{{"text": "Video 2"}}},
 															"shortBylineText": map[string]any{"runs": []map[string]any{{"text": "Author 2"}}},
-															"lengthSeconds": "240",
+															"lengthSeconds":   "240",
 														},
 													},
 												},
@@ -226,9 +308,9 @@ func TestPlaylist_SingleColumn(t *testing.T) {
 }
 
 func TestPlayerWithEnrichment_NoLikesThenWEB(t *testing.T) {
-	callCount := 0
+	var callCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		var req PlayerRequest
 		json.NewDecoder(r.Body).Decode(&req)
 
@@ -252,14 +334,14 @@ func TestPlayerWithEnrichment_NoLikesThenWEB(t *testing.T) {
 
 	resp, err := client.PlayerWithEnrichment(context.Background(), "dQw4w9WgXcQ")
 	require.NoError(t, err)
-	assert.Equal(t, 2, callCount)
+	assert.Equal(t, int32(3), callCount.Load()) // ANDROID_VR + VISIONOS + WEB
 	assert.Equal(t, "42000", resp.VideoDetails.LikeCount)
 }
 
 func TestPlayerWithEnrichment_AlreadyHasLikes(t *testing.T) {
-	callCount := 0
+	var callCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		resp := buildPlayerResponse("OK", "")
 		resp["videoDetails"].(map[string]any)["likeCount"] = "15000"
 		body, _ := json.Marshal(resp)
@@ -272,7 +354,7 @@ func TestPlayerWithEnrichment_AlreadyHasLikes(t *testing.T) {
 
 	resp, err := client.PlayerWithEnrichment(context.Background(), "dQw4w9WgXcQ")
 	require.NoError(t, err)
-	assert.Equal(t, 1, callCount)
+	assert.Equal(t, int32(2), callCount.Load()) // ANDROID_VR + VISIONOS, no WEB
 	assert.Equal(t, "15000", resp.VideoDetails.LikeCount)
 }
 
@@ -400,7 +482,6 @@ func (t *testTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	return http.DefaultTransport.RoundTrip(req)
 }
-
 
 func TestRefreshVisitorIDRetry(t *testing.T) {
 	callCount := 0

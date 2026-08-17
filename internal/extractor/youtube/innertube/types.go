@@ -1,10 +1,11 @@
 // Package innertube provides a minimal, zero-dependency client for YouTube's
-// private Innertube API. It targets the ANDROID_VR client which returns
-// pre-decrypted URLs without requiring JavaScript execution.
+// private Innertube API. It fetches JS-less clients in parallel (VISIONOS for
+// adaptive HTTPS, ANDROID_VR for muxed itag 18) so downloads do not require
+// signature deciphering or a GVS PO token.
 //
-// As of 2026-08 (yt-dlp #17348), ANDROID_VR adaptive HTTPS itags (137, 140, …)
-// need a GVS PO token or they 403. Muxed itag 18 still works without one.
-// Engine falls back to that muxed progressive stream after a 403.
+// As of 2026-08 (yt-dlp #17348 / #17261), ANDROID_VR adaptive HTTPS itags
+// (137, 140, …) need a GVS PO token or they 403. Muxed itag 18 still works
+// without one. VISIONOS adaptive formats do not require a PO token today.
 package innertube
 
 // PlayerRequest is the JSON body sent to /youtubei/v1/player.
@@ -17,6 +18,9 @@ type PlayerRequest struct {
 	ContentCheckOK  bool             `json:"contentCheckOk,omitempty"`
 	RacyCheckOk     bool             `json:"racyCheckOk,omitempty"`
 	Params          string           `json:"params"`
+
+	// headerClientName is X-Youtube-Client-Name. Empty defaults to "3".
+	headerClientName string `json:"-"`
 }
 
 // RequestContext wraps the client metadata.
@@ -34,7 +38,10 @@ type ClientInfo struct {
 	UserAgent         string `json:"userAgent,omitempty"`
 	TimeZone          string `json:"timeZone"`
 	UTCOffset         int    `json:"utcOffsetMinutes"`
+	DeviceMake        string `json:"deviceMake,omitempty"`
 	DeviceModel       string `json:"deviceModel,omitempty"`
+	OSName            string `json:"osName,omitempty"`
+	OSVersion         string `json:"osVersion,omitempty"`
 	VisitorData       string `json:"visitorData,omitempty"`
 }
 
@@ -100,7 +107,7 @@ type Format struct {
 	AudioChannels    int    `json:"audioChannels,omitempty"`
 	Quality          string `json:"quality,omitempty"`
 
-	InitRange *Range `json:"initRange,omitempty"`
+	InitRange  *Range `json:"initRange,omitempty"`
 	IndexRange *Range `json:"indexRange,omitempty"`
 
 	AudioTrack *AudioTrack `json:"audioTrack,omitempty"`
@@ -173,11 +180,11 @@ type Captions struct {
 
 // CaptionTrack represents a single subtitle track.
 type CaptionTrack struct {
-	BaseURL      string `json:"baseUrl"`
-	Name         Text   `json:"name"`
-	LanguageCode string `json:"languageCode"`
-	Kind         string `json:"kind,omitempty"`
-	IsTranslatable bool `json:"isTranslatable,omitempty"`
+	BaseURL        string `json:"baseUrl"`
+	Name           Text   `json:"name"`
+	LanguageCode   string `json:"languageCode"`
+	Kind           string `json:"kind,omitempty"`
+	IsTranslatable bool   `json:"isTranslatable,omitempty"`
 }
 
 // Text is a common Innertube wrapper for simple text or runs.
@@ -204,9 +211,9 @@ func (t Text) String() string {
 
 // PlaylistResponse is the root JSON returned by the browse endpoint for playlists.
 type PlaylistResponse struct {
-	Header   PlaylistHeader   `json:"header"`
-	Sidebar  PlaylistSidebar  `json:"sidebar"`
-	Contents BrowseContents   `json:"contents"`
+	Header   PlaylistHeader  `json:"header"`
+	Sidebar  PlaylistSidebar `json:"sidebar"`
+	Contents BrowseContents  `json:"contents"`
 }
 
 // PlaylistHeader contains the playlist title and description.
@@ -275,10 +282,10 @@ type BrowseTab struct {
 // PlaylistVideoItem is either a video entry or a continuation token.
 type PlaylistVideoItem struct {
 	PlaylistVideoRenderer struct {
-		VideoID   string      `json:"videoId"`
-		Title     Text        `json:"title"`
-		Author    Text        `json:"shortBylineText"`
-		Duration  string      `json:"lengthSeconds"`
+		VideoID   string `json:"videoId"`
+		Title     Text   `json:"title"`
+		Author    Text   `json:"shortBylineText"`
+		Duration  string `json:"lengthSeconds"`
 		Thumbnail struct {
 			Thumbnails []Thumbnail `json:"thumbnails"`
 		} `json:"thumbnail"`

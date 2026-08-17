@@ -31,9 +31,9 @@ var contentPlaybackNonceAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqr
 
 // Client makes requests to YouTube's Innertube API.
 type Client struct {
-	HTTPClient *http.Client
-	visitorID  string
-	consentID  string
+	HTTPClient     *http.Client
+	visitorID      string
+	consentID      string
 	visitorUpdated time.Time
 }
 
@@ -55,22 +55,6 @@ func NewClientWithTransport(rt http.RoundTripper, timeout time.Duration) *Client
 	return &Client{
 		HTTPClient: &http.Client{Transport: rt, Timeout: timeout},
 		consentID:  strconv.Itoa(rand.Intn(899) + 100),
-	}
-}
-
-// androidVRContext returns the ANDROID_VR client context.
-func androidVRContext(visitorID string) RequestContext {
-	return RequestContext{
-		Client: ClientInfo{
-			HL:                "en",
-			GL:                "US",
-			ClientName:        "ANDROID_VR",
-			ClientVersion:     androidVRVer,
-			UserAgent:         androidVRAgent,
-			TimeZone:          "UTC",
-			UTCOffset:         0,
-			VisitorData:       visitorID,
-		},
 	}
 }
 
@@ -178,10 +162,16 @@ func (c *Client) doPostJSON(ctx context.Context, endpoint string, body any) ([]b
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 
 	if rc, ok := body.(PlayerRequest); ok {
-		req.Header.Set("User-Agent", rc.Context.Client.UserAgent)
-		// kkdai hardcodes X-Youtube-Client-Name to "3" (ANDROID) regardless of actual client.
-		// This inconsistency appears to help bypass bot detection.
-		req.Header.Set("X-Youtube-Client-Name", "3")
+		if rc.Context.Client.UserAgent != "" {
+			req.Header.Set("User-Agent", rc.Context.Client.UserAgent)
+		}
+		// ANDROID_VR keeps header "3" (see androidVRClient). Other clients
+		// send their documented Innertube client-name id.
+		name := rc.headerClientName
+		if name == "" {
+			name = "3"
+		}
+		req.Header.Set("X-Youtube-Client-Name", name)
 		req.Header.Set("X-Youtube-Client-Version", rc.Context.Client.ClientVersion)
 		req.Header.Set("x-goog-visitor-id", c.visitorID)
 	}

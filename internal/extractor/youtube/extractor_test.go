@@ -84,6 +84,11 @@ func TestMapFormat_AudioABR(t *testing.T) {
 	assert.InDelta(t, 130.0, format.ABR, 0.01)
 }
 
+func TestMapFormat_EmptyURL(t *testing.T) {
+	f := mapFormat(innertube.Format{ItagNo: 137, URL: "", Cipher: "s=abc", MimeType: `video/mp4`})
+	assert.Empty(t, f.URL)
+}
+
 func TestParseMimeType(t *testing.T) {
 	ext, v, a := parseMimeType(`video/webm; codecs="vp9"`)
 	assert.Equal(t, "webm", ext)

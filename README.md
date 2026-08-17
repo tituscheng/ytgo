@@ -19,7 +19,7 @@ Designed as both a standalone CLI tool and a reusable Go library.
 | **JS engine** | None required | Required for sig deciphering |
 | **Python runtime** | None required | Required |
 
-ytgo uses a custom **YouTube Innertube client** with the `ANDROID_VR` client profile — it gets direct stream URLs with no JavaScript execution and no signature deciphering. Downloads use **bounded 10 MB chunk segmentation** to bypass YouTube CDN throttling, achieving full bandwidth speeds (~20+ MB/s) even on formats that would otherwise drop to ~32 KB/s. The `WEB_EMBEDDED_PLAYER` client provides fallback for age-restricted content.
+ytgo uses a custom **YouTube Innertube client** that fetches `VISIONOS` and `ANDROID_VR` in parallel — direct stream URLs with no JavaScript, no signature deciphering, and no GVS PO token. `VISIONOS` supplies adaptive quality; `ANDROID_VR` keeps muxed itag 18 when adaptive HTTPS would 403. Downloads use **bounded 10 MB chunk segmentation** to bypass YouTube CDN throttling, achieving full bandwidth speeds (~20+ MB/s) even on formats that would otherwise drop to ~32 KB/s. `WEB_EMBEDDED_PLAYER` covers age-restricted videos; `TVHTML5` covers kids / unplayable responses.
 
 If you need sponsorblock, 1000+ site extractors, or `--cookies-from-browser`, yt-dlp is still the tool for the job. ytgo is for when you want a fast, light, Go-native downloader for YouTube, Rumble, Dailymotion, and Cloudflare Stream.
 
@@ -381,7 +381,7 @@ sub-langs:
 | `internal/extractor/rumble` | Rumble embedJS client, page URL resolution, format parsing |
 | `internal/extractor/dailymotion` | Dailymotion player-metadata client, URL parsing, format parsing |
 | `internal/extractor/youtube` | YouTube extractor wrapping the custom Innertube client; exposes HLS/DASH manifests for live replays |
-| `internal/extractor/youtube/innertube` | Direct YouTube Innertube API client (ANDROID_VR / WEB_EMBEDDED_PLAYER) |
+| `internal/extractor/youtube/innertube` | Direct YouTube Innertube API client (VISIONOS + ANDROID_VR, WEB_EMBEDDED_PLAYER / TVHTML5 fallbacks) |
 | `internal/extractor/cloudflarestream` | Cloudflare Stream URL parsing, HLS/DASH format extraction |
 | `internal/transport` | Tuned HTTP transport and header injection for media CDN requests |
 | `internal/core` | Engine: format download, weighted video-wide progress, post-process orchestration |
@@ -490,7 +490,7 @@ ytgo is intentionally lean. Things yt-dlp does that ytgo does **not** yet suppor
 - **Cloudflare embed detection** — no generic webpage scraping for embedded Stream players
 - **Adaptive download resume** — segment-level resume applies to direct HTTP downloads (YouTube VOD) and native HLS fMP4 (`.hlsfrags` sidecar, e.g. Dailymotion); FFmpeg HLS/DASH paths (YouTube live replays, Rumble, Cloudflare Stream) do not yet share the same resume integration
 - **Active live recording** — archived live replays are supported; in-progress live streams (manifest refresh, `--live-from-start`) are not
-- **Throttling bypass** — bounded chunk downloading handles most YouTube throttling; `ANDROID_VR` avoids signature-based throttling
+- **Throttling bypass** — bounded chunk downloading handles most YouTube throttling; JS-less Innertube clients avoid signature-based throttling
 - **String regex filters** — ytgo uses type-safe preference scoring and Go filter functions instead
 - **Structured logging** — optional `*slog.Logger` injection for library users
 

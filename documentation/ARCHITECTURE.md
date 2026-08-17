@@ -138,7 +138,7 @@ URL ──▶ youtube.Extractor.Extract()
 |---|---|---|
 | JS engine | Embedded goja (V8 in Go) | None |
 | Binary size | ~+10 MB | ~0 MB |
-| Player client | WEB (requires sig deciphering) | ANDROID_VR (direct URLs) |
+| Player client | WEB (requires sig deciphering) | VISIONOS + ANDROID_VR (direct URLs, no PO token) |
 | Age-restricted | Often fails | WEB_EMBEDDED_PLAYER fallback |
 | Playlist | Basic | Full continuation pagination |
 
@@ -154,8 +154,8 @@ The custom client was built because kkdai's WEB client requires JavaScript execu
   - Request building: JSON POST to `/youtubei/v1/player` or `/youtubei/v1/browse` with `X-Youtube-Client-Name`, `X-Youtube-Client-Version`, and `x-goog-visitor-id` headers.
 
 - **`player.go`** — Video metadata extraction.
-  - Primary: `ANDROID_VR` client (client name 3, version 1.65.10). No API key. Returns direct URLs.
-  - Fallback: `WEB_EMBEDDED_PLAYER` on `LOGIN_REQUIRED` status.
+  - Parallel JS-less clients: `VISIONOS` (adaptive HTTPS, no GVS PO token) + `ANDROID_VR` (muxed itag 18). ANDROID_VR adaptive HTTPS is skipped when VISIONOS already supplied adaptive streams (yt-dlp #17348).
+  - Fallback: `WEB_EMBEDDED_PLAYER` on age-gate `LOGIN_REQUIRED`; `TVHTML5` downgraded on kids / unplayable.
   - Error on `ERROR` status or private videos.
 
 - **`playlist.go`** — Playlist metadata extraction.

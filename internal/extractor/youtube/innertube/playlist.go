@@ -34,8 +34,8 @@ func (c *Client) Playlist(ctx context.Context, playlistID string) (*PlaylistInfo
 	}
 
 	req := PlayerRequest{
-		BrowseID:     "VL" + playlistID,
-		Context:      androidVRContext(visitorID),
+		BrowseID:       "VL" + playlistID,
+		Context:        androidVRContext(visitorID),
 		ContentCheckOK: true,
 		RacyCheckOk:    true,
 	}
@@ -87,8 +87,8 @@ func (c *Client) Playlist(ctx context.Context, playlistID string) (*PlaylistInfo
 			return nil, err
 		}
 		contReq := PlayerRequest{
-			Continuation: continuation,
-			Context:      androidVRContext(visitorID),
+			Continuation:   continuation,
+			Context:        androidVRContext(visitorID),
 			ContentCheckOK: true,
 			RacyCheckOk:    true,
 		}

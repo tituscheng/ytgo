@@ -21,8 +21,8 @@ var (
 
 // Extractor implements extractor.InfoExtractor for YouTube.
 type Extractor struct {
-	client  *innertube.Client
-	Enrich  bool // if true, makes secondary API calls for additional metadata
+	client *innertube.Client
+	Enrich bool // if true, makes secondary API calls for additional metadata
 }
 
 // NewExtractor creates a new YouTube extractor that uses the tuned
@@ -115,12 +115,16 @@ func (e *Extractor) extractVideo(ctx context.Context, videoID, rawURL string) (*
 		})
 	}
 
-	// Formats
+	// Formats. Cipher-only / SABR streams have no URL and need JS we do not run.
 	for _, f := range resp.StreamingData.Formats {
-		info.Formats = append(info.Formats, mapFormat(f))
+		if mapped := mapFormat(f); mapped.URL != "" {
+			info.Formats = append(info.Formats, mapped)
+		}
 	}
 	for _, f := range resp.StreamingData.AdaptiveFormats {
-		info.Formats = append(info.Formats, mapFormat(f))
+		if mapped := mapFormat(f); mapped.URL != "" {
+			info.Formats = append(info.Formats, mapped)
+		}
 	}
 	appendManifestFormats(info, resp)
 

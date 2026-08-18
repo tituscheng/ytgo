@@ -130,6 +130,28 @@ func TestSelectWithPrefs_VideoCodec(t *testing.T) {
 	assert.Equal(t, "2", result[0].FormatID)
 }
 
+func TestSelectBestAudioPrefersOriginal(t *testing.T) {
+	formats := []extractor.Format{
+		{FormatID: "140-es", ABR: 128, HasAudio: true, Language: "es"},
+		{FormatID: "140", ABR: 128, HasAudio: true, Language: "en", IsOriginal: true},
+	}
+	result, err := Select("ba", formats)
+	require.NoError(t, err)
+	assert.Equal(t, "140", result[0].FormatID)
+}
+
+func TestSelectWithPrefs_AudioCodecPrefersOriginalOverCodec(t *testing.T) {
+	formats := []extractor.Format{
+		{FormatID: "140-es", ABR: 128, AudioCodec: "mp4a.40.2", HasAudio: true, Language: "es"},
+		{FormatID: "251", ABR: 160, AudioCodec: "opus", HasAudio: true, Language: "en", IsOriginal: true},
+	}
+	result, err := SelectWithOptions("ba", formats, SelectOptions{
+		Preferences: Preferences{PreferAudioCodec: "mp4a"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "251", result[0].FormatID)
+}
+
 func TestSelectWithPrefs_AudioCodec(t *testing.T) {
 	formats := []extractor.Format{
 		{FormatID: "1", ABR: 160, AudioCodec: "opus", Ext: "webm", HasAudio: true},

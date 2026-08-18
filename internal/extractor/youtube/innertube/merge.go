@@ -1,6 +1,10 @@
 package innertube
 
-import "strings"
+import (
+	"net/url"
+	"strconv"
+	"strings"
+)
 
 // mergeStreaming combines player streaming data the way yt-dlp nightly does,
 // with one extra step:
@@ -13,21 +17,26 @@ import "strings"
 //  4. If the quality client is empty (SABR-only or failed), keep ANDROID_VR
 //     adaptive as a last resort — enforcement is still intermittent.
 //
+// Same itag with different AudioTrack / xtags (YouTube auto-dubs) are distinct
+// streams. Deduping on itag alone keeps the first language — often a dub —
+// and drops the original.
+//
 // Formats without a direct URL (signatureCipher / SABR) are dropped: ytgo
 // has no JS n-sig solver.
 func mergeStreaming(vr, quality *StreamingData) StreamingData {
 	var out StreamingData
-	seen := map[int]struct{}{}
+	seen := map[string]struct{}{}
 
 	add := func(src []Format, dest *[]Format) {
 		for _, f := range src {
 			if !usableFormat(f) {
 				continue
 			}
-			if _, ok := seen[f.ItagNo]; ok {
+			key := audioVariantKey(f)
+			if _, ok := seen[key]; ok {
 				continue
 			}
-			seen[f.ItagNo] = struct{}{}
+			seen[key] = struct{}{}
 			*dest = append(*dest, f)
 		}
 	}
@@ -55,6 +64,28 @@ func mergeStreaming(vr, quality *StreamingData) StreamingData {
 		}
 	}
 	return out
+}
+
+// audioVariantKey distinguishes dubbed vs original copies of the same itag.
+func audioVariantKey(f Format) string {
+	id := strconv.Itoa(f.ItagNo)
+	if f.AudioTrack != nil {
+		if tid := strings.TrimSpace(f.AudioTrack.ID); tid != "" {
+			return id + ":" + tid
+		}
+	}
+	if xt := xtagsOf(f.URL); xt != "" {
+		return id + ":" + xt
+	}
+	return id
+}
+
+func xtagsOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Query().Get("xtags")
 }
 
 func usableFormat(f Format) bool {

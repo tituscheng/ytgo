@@ -59,6 +59,40 @@ func TestMergeStreaming_KeepsVRAdaptiveWhenVisionOSEmpty(t *testing.T) {
 	assert.ElementsMatch(t, []int{137, 140}, itags)
 }
 
+func TestMergeStreaming_KeepsDubbedAndOriginalItag(t *testing.T) {
+	es := &AudioTrack{DisplayName: "Spanish", ID: "es.3"}
+	en := &AudioTrack{DisplayName: "English original", ID: "en.4", AudioIsDefault: true}
+	got := mergeStreaming(nil, &StreamingData{
+		AdaptiveFormats: []Format{
+			{ItagNo: 140, URL: "https://vis.example/140?xtags=acont%3Ddubbed%3Alang%3Des", AudioTrack: es},
+			{ItagNo: 140, URL: "https://vis.example/140?xtags=acont%3Doriginal%3Alang%3Den", AudioTrack: en},
+			{ItagNo: 135, URL: "https://vis.example/135"},
+		},
+	})
+	require.Len(t, got.AdaptiveFormats, 3)
+	var tracks []string
+	for _, f := range got.AdaptiveFormats {
+		if f.ItagNo != 140 || f.AudioTrack == nil {
+			continue
+		}
+		tracks = append(tracks, f.AudioTrack.ID)
+	}
+	assert.ElementsMatch(t, []string{"es.3", "en.4"}, tracks)
+}
+
+func TestAudioVariantKey(t *testing.T) {
+	assert.Equal(t, "140:en.4", audioVariantKey(Format{
+		ItagNo:     140,
+		URL:        "https://x/140?xtags=acont%3Doriginal%3Alang%3Den",
+		AudioTrack: &AudioTrack{ID: "en.4"},
+	}))
+	assert.Equal(t, "140:acont=original:lang=en", audioVariantKey(Format{
+		ItagNo: 140,
+		URL:    "https://x/140?xtags=acont%3Doriginal%3Alang%3Den",
+	}))
+	assert.Equal(t, "18", audioVariantKey(Format{ItagNo: 18, URL: "https://x/18"}))
+}
+
 func TestMergeStreaming_DropsCipherAndEmptyURL(t *testing.T) {
 	got := mergeStreaming(nil, &StreamingData{
 		Formats: []Format{

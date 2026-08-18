@@ -357,6 +357,11 @@ func score(f *extractor.Format, prefs Preferences) float64 {
 	if f.HasAudio {
 		s += f.ABR * 10
 		s += float64(f.AudioChannels) * 50
+		// Outrank codec/container bonuses so a dubbed AAC does not beat
+		// the original when PreferAudioCodec is set.
+		if f.IsOriginal {
+			s += 20000
+		}
 	}
 	// Prefer larger filesize
 	if f.Filesize > 0 {

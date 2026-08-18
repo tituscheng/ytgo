@@ -84,6 +84,53 @@ func TestMapFormat_AudioABR(t *testing.T) {
 	assert.InDelta(t, 130.0, format.ABR, 0.01)
 }
 
+func TestMapFormat_OriginalAudioKeepsItagID(t *testing.T) {
+	f := innertube.Format{
+		ItagNo:   140,
+		URL:      "https://example.com/audio.m4a?xtags=acont%3Doriginal%3Alang%3Den",
+		MimeType: `audio/mp4; codecs="mp4a.40.2"`,
+		AudioTrack: &innertube.AudioTrack{
+			DisplayName:    "English original",
+			ID:             "en.4",
+			AudioIsDefault: true,
+		},
+	}
+	got := mapFormat(f)
+	assert.Equal(t, "140", got.FormatID)
+	assert.Equal(t, "en", got.Language)
+	assert.True(t, got.IsOriginal)
+}
+
+func TestMapFormat_DubbedAudioGetsLangSuffix(t *testing.T) {
+	f := innertube.Format{
+		ItagNo:   140,
+		URL:      "https://example.com/audio.m4a?xtags=acont%3Ddubbed%3Alang%3Des",
+		MimeType: `audio/mp4; codecs="mp4a.40.2"`,
+		AudioTrack: &innertube.AudioTrack{
+			DisplayName: "Spanish",
+			ID:          "es.3",
+		},
+	}
+	got := mapFormat(f)
+	assert.Equal(t, "140-es", got.FormatID)
+	assert.Equal(t, "es", got.Language)
+	assert.False(t, got.IsOriginal)
+}
+
+func TestAudioLangFromXTags(t *testing.T) {
+	lang, original := audioLang(innertube.Format{
+		URL: "https://example.com/a?xtags=acont%3Doriginal%3Alang%3Den",
+	})
+	assert.Equal(t, "en", lang)
+	assert.True(t, original)
+
+	lang, original = audioLang(innertube.Format{
+		URL: "https://example.com/a?xtags=acont%3Ddubbed%3Alang%3Des",
+	})
+	assert.Equal(t, "es", lang)
+	assert.False(t, original)
+}
+
 func TestMapFormat_EmptyURL(t *testing.T) {
 	f := mapFormat(innertube.Format{ItagNo: 137, URL: "", Cipher: "s=abc", MimeType: `video/mp4`})
 	assert.Empty(t, f.URL)

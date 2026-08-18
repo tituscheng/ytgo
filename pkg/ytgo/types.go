@@ -23,6 +23,7 @@ type Format struct {
 	QualityLabel   string  `json:"quality_label,omitempty"`
 	AudioChannels  int     `json:"audio_channels,omitempty"`
 	Language       string  `json:"language,omitempty"`
+	IsOriginal     bool    `json:"is_original,omitempty"`
 	HasVideo       bool    `json:"has_video"`
 	HasAudio       bool    `json:"has_audio"`
 }

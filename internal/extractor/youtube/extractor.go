@@ -196,8 +196,13 @@ func (e *Extractor) extractPlaylist(ctx context.Context, playlistID, rawURL stri
 
 func mapFormat(f innertube.Format) extractor.Format {
 	ext, vcodec, acodec := parseMimeType(f.MimeType)
+	lang, original := audioLang(f)
+	formatID := strconv.Itoa(f.ItagNo)
+	if lang != "" && !original {
+		formatID += "-" + lang
+	}
 	format := extractor.Format{
-		FormatID:      strconv.Itoa(f.ItagNo),
+		FormatID:      formatID,
 		URL:           f.URL,
 		Ext:           ext,
 		Width:         f.Width,
@@ -210,6 +215,8 @@ func mapFormat(f innertube.Format) extractor.Format {
 		Quality:       f.Quality,
 		QualityLabel:  f.QualityLabel,
 		AudioChannels: f.AudioChannels,
+		Language:      lang,
+		IsOriginal:    original,
 	}
 	// Prefer averageBitrate for ABR (audio ranking); fall back to peak bitrate.
 	if f.AverageBitrate > 0 {
@@ -270,6 +277,52 @@ func extractPlaylistID(u string) string {
 		return m[1]
 	}
 	return ""
+}
+
+func audioLang(f innertube.Format) (lang string, original bool) {
+	if f.AudioTrack != nil {
+		id := strings.TrimSpace(f.AudioTrack.ID)
+		if i := strings.IndexByte(id, '.'); i > 0 {
+			lang = normalizeLang(id[:i])
+		} else {
+			lang = normalizeLang(id)
+		}
+		name := strings.ToLower(f.AudioTrack.DisplayName)
+		original = strings.Contains(name, "original")
+		return lang, original
+	}
+	acont, xtlang := parseXTags(f.URL)
+	switch acont {
+	case "original":
+		return normalizeLang(xtlang), true
+	case "dubbed":
+		return normalizeLang(xtlang), false
+	}
+	return normalizeLang(xtlang), true
+}
+
+func parseXTags(raw string) (acont, lang string) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", ""
+	}
+	xt := u.Query().Get("xtags")
+	if xt == "" {
+		return "", ""
+	}
+	for part := range strings.SplitSeq(xt, ":") {
+		k, v, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "acont":
+			acont = v
+		case "lang":
+			lang = v
+		}
+	}
+	return acont, lang
 }
 
 func normalizeLang(l string) string {

@@ -53,16 +53,17 @@ If you need sponsorblock, 1000+ site extractors, or `--cookies-from-browser`, yt
 go install github.com/tituscheng/ytgo@latest
 ```
 
-Or build from source:
+Or from a clone ([Task](https://taskfile.dev) stamps `ytgo version` from the git tag):
 
 ```bash
 git clone https://github.com/tituscheng/ytgo.git
 cd ytgo
-go build -o ytgo .
+task install
 ```
 
 **Dependencies:**
 - [Go](https://go.dev/) 1.23+
+- [Task](https://taskfile.dev) — only needed to install from a clone (`task install`)
 - [FFmpeg](https://ffmpeg.org/) — required for merge, audio extract, embed, and adaptive/HLS downloads (YouTube live replays, Rumble, Cloudflare Stream); optional for YouTube VOD direct HTTP downloads only
 
 ---

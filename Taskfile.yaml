@@ -1,0 +1,20 @@
+version: "3"
+
+vars:
+  MODULE: github.com/tituscheng/ytgo
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+  LDFLAGS: -X {{.MODULE}}/cmd.version={{.VERSION}}
+
+tasks:
+  install:
+    aliases: [default]
+    desc: Install ytgo into GOBIN with the git tag as the version
+    cmds:
+      - echo "installing ytgo {{.VERSION}}"
+      - go install -ldflags="{{.LDFLAGS}}" .
+
+  build:
+    desc: Build ./ytgo with the git tag as the version
+    cmds:
+      - go build -ldflags="{{.LDFLAGS}}" -o ytgo .

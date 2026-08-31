@@ -16,6 +16,9 @@ import (
 func TestDefaultOptions(t *testing.T) {
 	opts := DefaultOptions()
 	assert.Equal(t, "bv*+ba/best", opts.Format)
+	assert.Equal(t, "avc1", opts.PreferVideoCodec)
+	assert.Equal(t, "mp4a", opts.PreferAudioCodec)
+	assert.Equal(t, "mp4", opts.PreferContainer)
 	assert.Equal(t, "%(title)s [%(id)s].%(ext)s", opts.OutputTemplate)
 	assert.True(t, opts.ContinuePartial)
 }

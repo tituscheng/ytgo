@@ -130,6 +130,22 @@ func TestSelectWithPrefs_VideoCodec(t *testing.T) {
 	assert.Equal(t, "2", result[0].FormatID)
 }
 
+func TestSelectWithPrefs_VideoCodecBeats4KAV1(t *testing.T) {
+	formats := []extractor.Format{
+		{FormatID: "399", Height: 2160, VideoCodec: "av01.0.12M.08", Ext: "mp4", HasVideo: true, Filesize: 2_300_000_000},
+		{FormatID: "137", Height: 1080, VideoCodec: "avc1.640028", Ext: "mp4", HasVideo: true, Filesize: 800_000_000},
+	}
+	result, err := Select("best", formats)
+	require.NoError(t, err)
+	assert.Equal(t, "399", result[0].FormatID)
+
+	result, err = SelectWithOptions("best", formats, SelectOptions{
+		Preferences: Preferences{PreferVideoCodec: "avc1"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "137", result[0].FormatID)
+}
+
 func TestSelectBestAudioPrefersOriginal(t *testing.T) {
 	formats := []extractor.Format{
 		{FormatID: "140-es", ABR: 128, HasAudio: true, Language: "es"},

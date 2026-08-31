@@ -368,16 +368,21 @@ func score(f *extractor.Format, prefs Preferences) float64 {
 		s += float64(f.Filesize) / 1e6
 	}
 
-	// Preference bonuses — large enough to outrank non-matching formats
-	const bonus = 5000
+	// Video codec bonus must outrank any height/filesize gap so preferred
+	// avc1 at 1080p beats AV1/VP9 at 4K (4320*10=43200 plus filesize ~1e4).
+	const videoCodecBonus = 100000
+	// Audio codec / container stay below IsOriginal (+20000) so a dubbed AAC
+	// track does not beat the original language.
+	const audioCodecBonus = 5000
+	const containerBonus = 5000
 	if prefs.PreferVideoCodec != "" && strings.HasPrefix(f.VideoCodec, prefs.PreferVideoCodec) {
-		s += bonus
+		s += videoCodecBonus
 	}
 	if prefs.PreferAudioCodec != "" && strings.HasPrefix(f.AudioCodec, prefs.PreferAudioCodec) {
-		s += bonus
+		s += audioCodecBonus
 	}
 	if prefs.PreferContainer != "" && f.Ext == prefs.PreferContainer {
-		s += bonus
+		s += containerBonus
 	}
 
 	return s

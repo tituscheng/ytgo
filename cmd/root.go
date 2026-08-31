@@ -54,9 +54,9 @@ func init() {
 	// Format selection
 	rootCmd.Flags().StringP("format", "f", cfg.Format, "Video format code or selector")
 	rootCmd.Flags().BoolP("list-formats", "F", false, "List available formats")
-	rootCmd.Flags().String("prefer-vcodec", "", "Prefer formats with this video codec prefix (e.g. avc1)")
-	rootCmd.Flags().String("prefer-acodec", "", "Prefer formats with this audio codec prefix (e.g. mp4a)")
-	rootCmd.Flags().String("prefer-ext", "", "Prefer formats with this container extension (e.g. mp4)")
+	rootCmd.Flags().String("prefer-vcodec", cfg.PreferVideoCodec, "Prefer formats with this video codec prefix (default avc1 / H.264)")
+	rootCmd.Flags().String("prefer-acodec", cfg.PreferAudioCodec, "Prefer formats with this audio codec prefix (default mp4a / AAC)")
+	rootCmd.Flags().String("prefer-ext", cfg.PreferContainer, "Prefer formats with this container extension (default mp4)")
 
 	// Output
 	rootCmd.Flags().StringP("output", "o", cfg.OutputTemplate, "Output filename template")

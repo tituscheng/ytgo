@@ -116,6 +116,9 @@ type DownloadOptions struct {
 func DefaultOptions() DownloadOptions {
 	return DownloadOptions{
 		Format:              "bv*+ba/best",
+		PreferVideoCodec:    "avc1",
+		PreferAudioCodec:    "mp4a",
+		PreferContainer:     "mp4",
 		OutputTemplate:      "%(title)s [%(id)s].%(ext)s",
 		SkipExisting:        true,
 		ContinuePartial:     true,

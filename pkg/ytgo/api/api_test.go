@@ -21,6 +21,7 @@ func TestDefaultOptions(t *testing.T) {
 	assert.Equal(t, "mp4", opts.PreferContainer)
 	assert.Equal(t, "%(title)s [%(id)s].%(ext)s", opts.OutputTemplate)
 	assert.True(t, opts.ContinuePartial)
+	assert.True(t, opts.YesPlaylist)
 }
 
 func TestGetStreamURL(t *testing.T) {

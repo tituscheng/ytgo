@@ -23,6 +23,8 @@ var (
 type Extractor struct {
 	client *innertube.Client
 	Enrich bool // if true, makes secondary API calls for additional metadata
+	// NoPlaylist, when true, downloads only the video from watch?v=&list= URLs.
+	NoPlaylist bool
 }
 
 // NewExtractor creates a new YouTube extractor that uses the tuned
@@ -55,8 +57,7 @@ func (e *Extractor) Extract(ctx context.Context, rawURL string) (*extractor.Vide
 	videoID := ExtractVideoID(rawURL)
 	playlistID := extractPlaylistID(rawURL)
 
-	// If no video ID but we have a playlist ID, extract the playlist directly
-	if videoID == "" && playlistID != "" {
+	if playlistID != "" && (videoID == "" || !e.NoPlaylist) {
 		return e.extractPlaylist(ctx, playlistID, rawURL)
 	}
 	if videoID == "" {
@@ -99,11 +100,11 @@ func (e *Extractor) extractVideo(ctx context.Context, videoID, rawURL string) (*
 		info.Duration = time.Duration(sec) * time.Second
 	}
 
-	// Publish date from microformat
+	// Publish date from microformat (RFC3339 or YYYY-MM-DD → YYYYMMDD)
 	if resp.Microformat.PlayerMicroformatRenderer.PublishDate != "" {
-		info.UploadDate = strings.ReplaceAll(resp.Microformat.PlayerMicroformatRenderer.PublishDate, "-", "")
+		info.UploadDate = normalizeUploadDate(resp.Microformat.PlayerMicroformatRenderer.PublishDate)
 	} else if resp.Microformat.PlayerMicroformatRenderer.UploadDate != "" {
-		info.UploadDate = strings.ReplaceAll(resp.Microformat.PlayerMicroformatRenderer.UploadDate, "-", "")
+		info.UploadDate = normalizeUploadDate(resp.Microformat.PlayerMicroformatRenderer.UploadDate)
 	}
 
 	// Thumbnails
@@ -250,8 +251,15 @@ func parseMimeType(mime string) (ext, vcodec, acodec string) {
 		if end >= 0 {
 			codecs := full[start : start+end]
 			codecParts := strings.Split(codecs, ",")
+			audio := strings.HasPrefix(strings.ToLower(full), "audio/")
 			for i, p := range codecParts {
 				p = strings.TrimSpace(p)
+				if audio {
+					if i == 0 {
+						acodec = p
+					}
+					continue
+				}
 				if i == 0 {
 					vcodec = p
 				} else {
@@ -261,6 +269,29 @@ func parseMimeType(mime string) (ext, vcodec, acodec string) {
 		}
 	}
 	return
+}
+
+func normalizeUploadDate(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t.Format("20060102")
+	}
+	if t, err := time.Parse("2006-01-02", raw); err == nil {
+		return t.Format("20060102")
+	}
+	digits := strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, raw)
+	if len(digits) >= 8 {
+		return digits[:8]
+	}
+	return raw
 }
 
 func ExtractVideoID(u string) string {

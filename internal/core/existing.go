@@ -19,6 +19,9 @@ var (
 		"mp3": true, "opus": true, "wav": true, "flac": true,
 		"avi": true, "mov": true,
 	}
+	audioExtensions = map[string]bool{
+		"m4a": true, "mp3": true, "opus": true, "wav": true, "flac": true, "ogg": true,
+	}
 	intermediateFormatRe = regexp.MustCompile(`\.f[\w-]+\.`)
 )
 
@@ -30,7 +33,9 @@ func outputDir(cfg config.DownloadOptions) string {
 }
 
 // findExistingMedia scans dir for a completed media file containing videoID.
-func findExistingMedia(dir, videoID string) (string, bool) {
+// When audioOnly is set (CLI -x), only audio containers match so an existing
+// video file does not skip audio extraction.
+func findExistingMedia(dir, videoID string, audioOnly bool) (string, bool) {
 	if videoID == "" {
 		return "", false
 	}
@@ -52,7 +57,11 @@ func findExistingMedia(dir, videoID string) (string, bool) {
 			continue
 		}
 		ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(name), "."))
-		if !mediaExtensions[ext] {
+		if audioOnly {
+			if !audioExtensions[ext] {
+				continue
+			}
+		} else if !mediaExtensions[ext] {
 			continue
 		}
 		return filepath.Join(dir, name), true
@@ -93,14 +102,14 @@ func (e *Engine) lookupExistingMedia(videoID string, showSpinner bool) (string, 
 		s.Start()
 		defer s.Stop()
 	}
-	return findExistingMedia(outputDir(e.Config), videoID)
+	return findExistingMedia(outputDir(e.Config), videoID, e.Config.ExtractAudio)
 }
 
 func (e *Engine) skipIfExistingMedia(videoID, title string) bool {
 	if !e.Config.SkipExisting || e.Config.OutputTemplate == "-" || videoID == "" {
 		return false
 	}
-	path, ok := findExistingMedia(outputDir(e.Config), videoID)
+	path, ok := findExistingMedia(outputDir(e.Config), videoID, e.Config.ExtractAudio)
 	if !ok {
 		return false
 	}

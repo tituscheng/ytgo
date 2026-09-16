@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -76,6 +77,23 @@ func TestValidateTargetFormat(t *testing.T) {
 func TestForceJSON3SetsQuery(t *testing.T) {
 	out := forceJSON3("https://www.youtube.com/api/timedtext?v=abc&lang=en")
 	assert.Contains(t, out, "fmt=json3")
+}
+
+func TestDownloadVTTPassthrough(t *testing.T) {
+	vtt := "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHi\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Empty(t, r.URL.Query().Get("fmt"))
+		_, _ = w.Write([]byte(vtt))
+	}))
+	defer srv.Close()
+
+	d := fastDownloader(srv.Client())
+	dest := filepath.Join(t.TempDir(), "out.vtt")
+	err := d.Download(context.Background(), extractor.Subtitle{URL: srv.URL + "/captions.vtt", Ext: "vtt"}, dest, "vtt")
+	require.NoError(t, err)
+	got, err := os.ReadFile(dest)
+	require.NoError(t, err)
+	assert.Equal(t, vtt, string(got))
 }
 
 func TestForceJSON3Overrides(t *testing.T) {
@@ -165,7 +183,7 @@ func TestDownloadAtomic_NoTmpOnConvertFailure(t *testing.T) {
 
 	d := fastDownloader(srv.Client())
 	dest := filepath.Join(t.TempDir(), "out.srt")
-	err := d.Download(context.Background(), extractor.Subtitle{URL: srv.URL}, dest, "srt")
+	err := d.Download(context.Background(), extractor.Subtitle{URL: srv.URL, Ext: "json3"}, dest, "srt")
 	require.Error(t, err)
 	require.NoFileExists(t, dest)
 	require.NoFileExists(t, dest+".tmp")

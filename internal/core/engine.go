@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/briandowns/spinner"
@@ -48,6 +49,7 @@ type Engine struct {
 
 	onErrorMu    sync.Mutex
 	onProgressMu sync.Mutex
+	stdoutMu     sync.Mutex
 }
 
 // reportProgress invokes the user-configured OnProgress callback, if set.
@@ -162,6 +164,10 @@ func (e *Engine) Run(ctx context.Context, rawURL string) (*ytgo.PlaylistReport, 
 		}
 	}
 
+	if ye, ok := ext.(*youtube.Extractor); ok {
+		ye.NoPlaylist = e.Config.NoPlaylist || !e.Config.YesPlaylist
+	}
+
 	e.log("extracting", slog.String("extractor", ext.Name()), slog.String("url", rawURL))
 	if e.Config.Verbose {
 		printTagged(color.New(color.FgYellow), tagInfo, fmt.Sprintf("Extracting via %s: %s", ext.Name(), rawURL))
@@ -196,9 +202,20 @@ func (e *Engine) Run(ctx context.Context, rawURL string) (*ytgo.PlaylistReport, 
 }
 
 func (e *Engine) runVideo(ctx context.Context, info *extractor.VideoInfo, arch *archive.Archive) error {
-	// --simulate or --list-formats
+	if e.Config.PrintJSON {
+		e.stdoutMu.Lock()
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		err := enc.Encode(info)
+		e.stdoutMu.Unlock()
+		if err != nil {
+			return fmt.Errorf("print json: %w", err)
+		}
+	}
 	if e.Config.ListFormats {
 		e.printFormats(info)
+	}
+	if e.Config.PrintJSON || e.Config.ListFormats {
 		return nil
 	}
 	if e.Config.Simulate || e.Config.SkipDownload {
@@ -314,8 +331,7 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 		partPath := outputPath + ".part"
 		finalPath := outputPath
 		if isStdout {
-			partPath = filepath.Join(os.TempDir(), filepath.Base(finalPath)) + ".part"
-			finalPath = filepath.Join(os.TempDir(), filepath.Base(finalPath))
+			partPath, finalPath = stdoutTempPaths(info.ID, selected[0].FormatID, selected[0].Ext)
 			temps.Push(partPath)
 			temps.Push(finalPath)
 		}
@@ -330,7 +346,7 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 				Error:     downloader.SummarizeStreamError(err),
 				Retryable: isRetryable(err),
 			})
-			return nil, fmt.Errorf("download format %s failed: %s", selected[0].FormatID, downloader.SummarizeStreamError(err))
+			return nil, fmt.Errorf("download format %s failed: %w", selected[0].FormatID, err)
 		}
 		if used.FormatID != selected[0].FormatID {
 			selected[0] = used
@@ -341,8 +357,8 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 			return nil, err
 		}
 		if isStdout {
-			temps.Pop() // finalPath (now the canonical temp file)
-			temps.Pop() // partPath consumed by rename
+			temps.Remove(finalPath)
+			temps.Remove(partPath)
 		}
 		downloaded[0] = finalPath
 	} else if shouldSerializeFormats(info) {
@@ -357,8 +373,7 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 			partPath := fmt.Sprintf("%s.f%s.%s.part", strings.TrimSuffix(outputPath, filepath.Ext(outputPath)), f.FormatID, ext)
 			finalPath := fmt.Sprintf("%s.f%s.%s", strings.TrimSuffix(outputPath, filepath.Ext(outputPath)), f.FormatID, ext)
 			if isStdout {
-				partPath = filepath.Join(os.TempDir(), filepath.Base(finalPath)) + ".part"
-				finalPath = filepath.Join(os.TempDir(), filepath.Base(finalPath))
+				partPath, finalPath = stdoutTempPaths(info.ID, f.FormatID, ext)
 				temps.Push(partPath)
 				temps.Push(finalPath)
 			}
@@ -388,8 +403,8 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 				return nil, err
 			}
 			if isStdout {
-				temps.Pop()
-				temps.Pop()
+				temps.Remove(finalPath)
+				temps.Remove(partPath)
 			}
 			downloaded[i] = finalPath
 		}
@@ -415,8 +430,7 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 				partPath := fmt.Sprintf("%s.f%s.%s.part", strings.TrimSuffix(outputPath, filepath.Ext(outputPath)), f.FormatID, ext)
 				finalPath := fmt.Sprintf("%s.f%s.%s", strings.TrimSuffix(outputPath, filepath.Ext(outputPath)), f.FormatID, ext)
 				if isStdout {
-					partPath = filepath.Join(os.TempDir(), filepath.Base(finalPath)) + ".part"
-					finalPath = filepath.Join(os.TempDir(), filepath.Base(finalPath))
+					partPath, finalPath = stdoutTempPaths(info.ID, f.FormatID, ext)
 					temps.Push(partPath)
 					temps.Push(finalPath)
 				}
@@ -450,8 +464,8 @@ func (e *Engine) downloadVideo(ctx context.Context, info *extractor.VideoInfo, a
 					return err
 				}
 				if isStdout {
-					temps.Pop()
-					temps.Pop()
+					temps.Remove(finalPath)
+					temps.Remove(partPath)
 				}
 				downloaded[i] = finalPath
 				return nil
@@ -500,7 +514,16 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 		if tr != nil {
 			merger.Progress = tr.stageCB(stageMerge, ytgo.PhaseMerge, info.Duration.Milliseconds())
 		}
-		merged, err := merger.Run(ctx, downloaded, outputPath, e.Config.MergeOutputFormat)
+		mergeOut := outputPath
+		if isStdout {
+			ext := e.Config.MergeOutputFormat
+			if ext == "" && len(downloaded) > 0 {
+				ext = strings.TrimPrefix(filepath.Ext(downloaded[0]), ".")
+			}
+			_, mergeOut = stdoutTempPaths(info.ID, "merge", ext)
+			defer e.cleanupFile(mergeOut)
+		}
+		merged, err := merger.Run(ctx, downloaded, mergeOut, e.Config.MergeOutputFormat)
 		if err != nil {
 			summary := downloader.SummarizeStreamError(err)
 			e.reportFailure(ytgo.DownloadFailure{
@@ -592,7 +615,12 @@ func (e *Engine) postProcessVideo(ctx context.Context, task *videoTask, arch *ar
 
 	// Record in archive
 	if arch != nil {
-		_ = arch.Add(info.ID)
+		if err := arch.Add(info.ID); err != nil {
+			e.log("archive add failed", slog.String("video_id", info.ID), slog.String("error", err.Error()))
+			if !e.Config.NoWarnings {
+				printTagged(color.New(color.FgYellow), tagInfo, "failed to update download archive: "+err.Error())
+			}
+		}
 	}
 
 	if tr != nil {
@@ -634,15 +662,7 @@ func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) (*y
 	printTagged(color.New(color.FgCyan), tagInfo,
 		fmt.Sprintf("Playlist: %s (%d entries)", info.PlaylistTitle, len(info.Entries)))
 
-	// Apply playlist range filters
-	start := e.Config.PlaylistStart - 1
-	if start < 0 {
-		start = 0
-	}
-	end := len(info.Entries)
-	if e.Config.PlaylistEnd > 0 && e.Config.PlaylistEnd < end {
-		end = e.Config.PlaylistEnd
-	}
+	start, end := playlistSlice(len(info.Entries), e.Config.PlaylistStart, e.Config.PlaylistEnd)
 	entries := info.Entries[start:end]
 
 	report := &ytgo.PlaylistReport{
@@ -721,21 +741,65 @@ func (e *Engine) runPlaylist(ctx context.Context, info *extractor.VideoInfo) (*y
 			job.PlaylistTitle = entry.PlaylistTitle
 
 			// If entry has no formats, re-extract it individually
-			if len(job.Formats) == 0 && !e.Config.SkipDownload && !e.Config.Simulate {
+			skipExtract := (e.Config.SkipDownload || e.Config.Simulate) && !e.Config.ListFormats && !e.Config.PrintJSON
+			if len(job.Formats) == 0 && !skipExtract {
 				for _, ext := range e.Extractors {
 					if ext.Suitable(job.OriginalURL) {
 						full, err := ext.Extract(ctx, job.OriginalURL)
-						if err == nil {
-							full.PlaylistIndex = job.PlaylistIndex
-							full.PlaylistCount = job.PlaylistCount
-							full.Playlist = job.Playlist
-							full.PlaylistID = job.PlaylistID
-							full.PlaylistTitle = job.PlaylistTitle
-							job = *full
+						if err != nil {
+							reportMu.Lock()
+							report.Failed = append(report.Failed, ytgo.DownloadFailure{
+								VideoID:   job.ID,
+								Title:     job.Title,
+								URL:       job.OriginalURL,
+								Stage:     "extract",
+								Error:     err.Error(),
+								Retryable: isRetryable(err),
+							})
+							reportMu.Unlock()
+							e.reportFailure(ytgo.DownloadFailure{
+								VideoID:   job.ID,
+								Title:     job.Title,
+								URL:       job.OriginalURL,
+								Stage:     "extract",
+								Error:     err.Error(),
+								Retryable: isRetryable(err),
+							})
+							if !e.Config.NoWarnings {
+								printTagged(color.New(color.FgRed), tagError,
+									fmt.Sprintf("extracting %s: %s", job.Title, downloader.SummarizeStreamError(err)))
+							}
+							return nil
 						}
+						full.PlaylistIndex = job.PlaylistIndex
+						full.PlaylistCount = job.PlaylistCount
+						full.Playlist = job.Playlist
+						full.PlaylistID = job.PlaylistID
+						full.PlaylistTitle = job.PlaylistTitle
+						job = *full
 						break
 					}
 				}
+			}
+
+			if e.Config.ListFormats || e.Config.Simulate || e.Config.SkipDownload || e.Config.PrintJSON {
+				if err := e.runVideo(ctx, &job, arch); err != nil {
+					reportMu.Lock()
+					report.Failed = append(report.Failed, ytgo.DownloadFailure{
+						VideoID:   job.ID,
+						Title:     job.Title,
+						URL:       job.OriginalURL,
+						Stage:     "download",
+						Error:     err.Error(),
+						Retryable: isRetryable(err),
+					})
+					reportMu.Unlock()
+					return nil
+				}
+				reportMu.Lock()
+				report.Succeeded++
+				reportMu.Unlock()
+				return nil
 			}
 
 			task, err := e.downloadVideo(ctx, &job, arch)
@@ -1406,8 +1470,7 @@ func (e *Engine) fallbackMuxedProgressive(
 	partPath := outputPath + ".part"
 	finalPath := outputPath
 	if isStdout {
-		partPath = filepath.Join(os.TempDir(), filepath.Base(finalPath)) + ".part"
-		finalPath = filepath.Join(os.TempDir(), filepath.Base(finalPath))
+		partPath, finalPath = stdoutTempPaths(info.ID, muxed.FormatID, muxed.Ext)
 		temps.Push(partPath)
 		temps.Push(finalPath)
 	}
@@ -1423,8 +1486,8 @@ func (e *Engine) fallbackMuxedProgressive(
 		return nil, false
 	}
 	if isStdout {
-		temps.Pop()
-		temps.Pop()
+		temps.Remove(finalPath)
+		temps.Remove(partPath)
 	}
 	e.cleanupAdaptivePartials(outputPath, failed)
 	return &videoTask{
@@ -1641,7 +1704,8 @@ func isRetryable(err error) bool {
 	}
 	// Fallback for non-typed errors
 	msg := err.Error()
-	if strings.Contains(msg, "429") || strings.Contains(msg, "503") || strings.Contains(msg, "504") {
+	if strings.Contains(msg, "429") || strings.Contains(msg, "500") ||
+		strings.Contains(msg, "502") || strings.Contains(msg, "503") || strings.Contains(msg, "504") {
 		return true
 	}
 	if strings.Contains(msg, "connection reset") ||
@@ -1784,6 +1848,47 @@ func (e *Engine) cleanupFile(p string) {
 			slog.String("path", p),
 			slog.String("error", err.Error()))
 	}
+}
+
+var stdoutSeq atomic.Int64
+
+func playlistSlice(n, start1, end1 int) (start, end int) {
+	start = start1 - 1
+	if start < 0 {
+		start = 0
+	}
+	if start > n {
+		start = n
+	}
+	end = n
+	if end1 > 0 && end1 < end {
+		end = end1
+	}
+	if end < start {
+		end = start
+	}
+	return start, end
+}
+
+func stdoutTempPaths(id, kind, ext string) (partPath, finalPath string) {
+	if id == "" {
+		id = "video"
+	}
+	id = strings.Map(func(r rune) rune {
+		switch r {
+		case '/', '\\', ':', '*', '?', '"', '<', '>', '|':
+			return '-'
+		default:
+			return r
+		}
+	}, id)
+	if ext == "" {
+		ext = "mp4"
+	}
+	ext = strings.TrimPrefix(ext, ".")
+	n := stdoutSeq.Add(1)
+	finalPath = filepath.Join(os.TempDir(), fmt.Sprintf("ytgo-%s-%s-%d-%d.%s", id, kind, os.Getpid(), n, ext))
+	return finalPath + ".part", finalPath
 }
 
 // renamePartFile atomically promotes a successful download from *.part to its

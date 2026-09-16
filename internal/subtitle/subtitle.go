@@ -2,6 +2,7 @@
 package subtitle
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -83,15 +84,20 @@ func (d *Downloader) Download(ctx context.Context, sub extractor.Subtitle, destP
 		return err
 	}
 
-	// Force the JSON3 timedtext format regardless of the URL YouTube handed us;
-	// XML variants (srv1/srv2/srv3) aren't parsed here.
-	fetchURL := forceJSON3(sub.URL)
+	from, fetchURL := subtitleFetch(sub)
 	data, err := d.fetchWithRetry(ctx, fetchURL)
 	if err != nil {
 		return fmt.Errorf("fetch subtitle: %w", err)
 	}
+	if from == "" {
+		if json.Valid(bytes.TrimSpace(data)) {
+			from = "json3"
+		} else {
+			from = "vtt"
+		}
+	}
 
-	converted, err := Convert(data, "json3", targetFormat)
+	converted, err := Convert(data, from, targetFormat)
 	if err != nil {
 		return fmt.Errorf("convert subtitle: %w", err)
 	}
@@ -261,6 +267,36 @@ func parseRetryAfter(h string) time.Duration {
 
 // forceJSON3 rewrites a YouTube timedtext URL so the response is JSON3.
 // Falls back to the original URL on parse failure.
+func subtitleFetch(sub extractor.Subtitle) (from, fetchURL string) {
+	from = strings.ToLower(strings.TrimPrefix(sub.Ext, "."))
+	fetchURL = sub.URL
+	if from == "json3" || from == "srv1" || from == "srv2" || from == "srv3" || isYouTubeTimedText(sub.URL) {
+		return "json3", forceJSON3(sub.URL)
+	}
+	if from == "" {
+		if strings.Contains(strings.ToLower(sub.URL), ".vtt") {
+			from = "vtt"
+		} else if strings.Contains(strings.ToLower(sub.URL), ".srt") {
+			from = "srt"
+		} else {
+			from = "vtt"
+		}
+	}
+	return from, fetchURL
+}
+
+func isYouTubeTimedText(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "youtube.com" || strings.HasSuffix(host, ".youtube.com") {
+		return true
+	}
+	return strings.Contains(strings.ToLower(u.Path), "timedtext")
+}
+
 func forceJSON3(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {

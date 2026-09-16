@@ -122,6 +122,7 @@ func DefaultOptions() DownloadOptions {
 		OutputTemplate:      "%(title)s [%(id)s].%(ext)s",
 		SkipExisting:        true,
 		ContinuePartial:     true,
+		YesPlaylist:         true,
 		PlaylistStart:       1,
 		ConcurrentFragments: 1,
 		SocketTimeout:       30 * time.Second,

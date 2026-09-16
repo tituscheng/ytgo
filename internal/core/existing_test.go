@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -19,28 +20,28 @@ func TestFindExistingMedia(t *testing.T) {
 		path := filepath.Join(dir, "Never Gonna Give You Up ["+videoID+"].mp4")
 		require.NoError(t, os.WriteFile(path, []byte("video"), 0644))
 
-		found, ok := findExistingMedia(dir, videoID)
+		found, ok := findExistingMedia(dir, videoID, false)
 		require.True(t, ok)
 		assert.Equal(t, path, found)
 	})
 
 	t.Run("no match when directory empty", func(t *testing.T) {
 		empty := t.TempDir()
-		_, ok := findExistingMedia(empty, videoID)
+		_, ok := findExistingMedia(empty, videoID, false)
 		assert.False(t, ok)
 	})
 
 	t.Run("exclude part file", func(t *testing.T) {
 		d := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(d, "Video ["+videoID+"].mp4.part"), []byte("partial"), 0644))
-		_, ok := findExistingMedia(d, videoID)
+		_, ok := findExistingMedia(d, videoID, false)
 		assert.False(t, ok)
 	})
 
 	t.Run("exclude intermediate format file", func(t *testing.T) {
 		d := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(d, "Video ["+videoID+"].f137.mp4"), []byte("partial"), 0644))
-		_, ok := findExistingMedia(d, videoID)
+		_, ok := findExistingMedia(d, videoID, false)
 		assert.False(t, ok)
 	})
 
@@ -48,20 +49,31 @@ func TestFindExistingMedia(t *testing.T) {
 		d := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(d, "Video ["+videoID+"].info.json"), []byte("{}"), 0644))
 		require.NoError(t, os.WriteFile(filepath.Join(d, "Video ["+videoID+"].description"), []byte("desc"), 0644))
-		_, ok := findExistingMedia(d, videoID)
+		_, ok := findExistingMedia(d, videoID, false)
 		assert.False(t, ok)
 	})
 
 	t.Run("empty video ID", func(t *testing.T) {
-		_, ok := findExistingMedia(dir, "")
+		_, ok := findExistingMedia(dir, "", false)
 		assert.False(t, ok)
 	})
 
 	t.Run("non-media extension ignored", func(t *testing.T) {
 		d := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(d, "Video ["+videoID+"].txt"), []byte("nope"), 0644))
-		_, ok := findExistingMedia(d, videoID)
+		_, ok := findExistingMedia(d, videoID, false)
 		assert.False(t, ok)
+	})
+
+	t.Run("audio only ignores video file", func(t *testing.T) {
+		d := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(d, "Video ["+videoID+"].mp4"), []byte("video"), 0644))
+		_, ok := findExistingMedia(d, videoID, true)
+		assert.False(t, ok)
+		require.NoError(t, os.WriteFile(filepath.Join(d, "Video ["+videoID+"].mp3"), []byte("audio"), 0644))
+		found, ok := findExistingMedia(d, videoID, true)
+		require.True(t, ok)
+		assert.True(t, strings.HasSuffix(found, ".mp3"))
 	})
 }
 

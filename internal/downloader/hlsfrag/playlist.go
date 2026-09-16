@@ -23,6 +23,10 @@ type Fragment struct {
 	URL   string
 	// IsInit is true for EXT-X-MAP initialization segments.
 	IsInit bool
+	// Offset/Length are set when EXT-X-BYTERANGE (or MAP BYTERANGE) is present.
+	// Length 0 means the whole resource.
+	Offset int64
+	Length int64
 }
 
 // Variant is one STREAM-INF entry from a multivariant (master) playlist.
@@ -68,6 +72,9 @@ func ParseMediaPlaylist(r io.Reader, baseURL string) (*Playlist, error) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
 
 	var pendingMapURI string
+	var pendingMapRange offsetLength
+	var pendingByteRange offsetLength
+	var lastRangeEnd int64 = -1
 	var pendingVariant *Variant
 	index := 0
 
@@ -114,21 +121,33 @@ func ParseMediaPlaylist(r io.Reader, baseURL string) (*Playlist, error) {
 			if method != "" && method != "NONE" {
 				pl.Encrypted = true
 			}
+		case strings.HasPrefix(line, "#EXT-X-BYTERANGE:"):
+			pendingByteRange = parseOffsetLength(strings.TrimPrefix(line, "#EXT-X-BYTERANGE:"), lastRangeEnd)
 		case strings.HasPrefix(line, "#EXT-X-MAP:"):
 			attrs := parseAttrs(strings.TrimPrefix(line, "#EXT-X-MAP:"))
 			pendingMapURI = attrs["URI"]
+			if attrs["BYTERANGE"] != "" {
+				pendingMapRange = parseOffsetLength(attrs["BYTERANGE"], -1)
+			}
 			if pendingMapURI != "" {
 				abs, err := resolve(base, pendingMapURI)
 				if err != nil {
 					return nil, err
 				}
-				pl.Fragments = append(pl.Fragments, Fragment{
+				frag := Fragment{
 					Index:  index,
 					URL:    abs,
 					IsInit: true,
-				})
+					Offset: pendingMapRange.offset,
+					Length: pendingMapRange.length,
+				}
+				pl.Fragments = append(pl.Fragments, frag)
+				if frag.Length > 0 {
+					lastRangeEnd = frag.Offset + frag.Length - 1
+				}
 				index++
 				pendingMapURI = ""
+				pendingMapRange = offsetLength{}
 			}
 		case strings.HasPrefix(line, "#"):
 			// other tags ignored
@@ -151,10 +170,19 @@ func ParseMediaPlaylist(r io.Reader, baseURL string) (*Playlist, error) {
 			if err != nil {
 				return nil, err
 			}
-			pl.Fragments = append(pl.Fragments, Fragment{
-				Index: index,
-				URL:   abs,
-			})
+			frag := Fragment{
+				Index:  index,
+				URL:    abs,
+				Offset: pendingByteRange.offset,
+				Length: pendingByteRange.length,
+			}
+			pl.Fragments = append(pl.Fragments, frag)
+			if frag.Length > 0 {
+				lastRangeEnd = frag.Offset + frag.Length - 1
+			} else {
+				lastRangeEnd = -1
+			}
+			pendingByteRange = offsetLength{}
 			index++
 		}
 	}
@@ -172,6 +200,30 @@ func ParseMediaPlaylist(r io.Reader, baseURL string) (*Playlist, error) {
 		return nil, fmt.Errorf("no media segments in playlist")
 	}
 	return pl, nil
+}
+
+type offsetLength struct {
+	offset int64
+	length int64
+}
+
+func parseOffsetLength(raw string, prevEnd int64) offsetLength {
+	raw = strings.TrimSpace(strings.Trim(raw, `"`))
+	if raw == "" {
+		return offsetLength{}
+	}
+	n, off, found := strings.Cut(raw, "@")
+	length, err := strconv.ParseInt(strings.TrimSpace(n), 10, 64)
+	if err != nil || length <= 0 {
+		return offsetLength{}
+	}
+	var offset int64
+	if found {
+		offset, _ = strconv.ParseInt(strings.TrimSpace(off), 10, 64)
+	} else if prevEnd >= 0 {
+		offset = prevEnd + 1
+	}
+	return offsetLength{offset: offset, length: length}
 }
 
 // BestVariant returns the highest-bandwidth variant, or nil.

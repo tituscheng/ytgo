@@ -42,3 +42,31 @@ func TestCleanupEmpty(t *testing.T) {
 	var s Stack
 	s.Cleanup() // should not panic
 }
+
+func TestStackRemoveByPath(t *testing.T) {
+	f1, err := os.CreateTemp("", "cleanup-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f1.Close()
+	f2, err := os.CreateTemp("", "cleanup-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f2.Close()
+	defer os.Remove(f1.Name())
+	defer os.Remove(f2.Name())
+
+	var s Stack
+	s.Push(f1.Name())
+	s.Push(f2.Name())
+	s.Remove(f1.Name())
+	s.Cleanup()
+
+	if _, err := os.Stat(f1.Name()); os.IsNotExist(err) {
+		t.Errorf("f1 should still exist after Remove")
+	}
+	if _, err := os.Stat(f2.Name()); !os.IsNotExist(err) {
+		t.Errorf("f2 should have been removed")
+	}
+}

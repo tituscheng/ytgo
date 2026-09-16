@@ -156,6 +156,10 @@ func run(cmd *cobra.Command, args []string) error {
 	if noSkipExisting, _ := cmd.Flags().GetBool("no-skip-existing"); noSkipExisting {
 		cfg.SkipExisting = false
 	}
+	if noPlaylist, _ := cmd.Flags().GetBool("no-playlist"); noPlaylist {
+		cfg.NoPlaylist = true
+		cfg.YesPlaylist = false
+	}
 	if cfg.ExtractAudio && cfg.Format == config.DefaultOptions().Format && !cmd.Flags().Changed("format") {
 		cfg.Format = "ba/best"
 	}

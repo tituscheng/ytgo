@@ -107,6 +107,24 @@ seg.m4s
 	assert.Equal(t, "SEGDATA", string(data))
 }
 
+func TestDownloadToFile_DemuxedAudioMasterErrors(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/master.m3u8", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",URI="audio.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000,AUDIO="aac"
+media.m3u8
+`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	d := &Downloader{Client: srv.Client(), Workers: 2}
+	err := d.DownloadToFile(context.Background(), srv.URL+"/master.m3u8", filepath.Join(t.TempDir(), "o.mp4"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "demuxed HLS audio")
+}
+
 func TestDownloadToFile_NestedMasterErrors(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`#EXTM3U

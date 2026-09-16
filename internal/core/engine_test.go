@@ -732,7 +732,27 @@ func TestIsRetryableNetwork(t *testing.T) {
 	// Test typed errors
 	assert.True(t, isRetryable(&downloader.StatusError{StatusCode: 429}), "typed 429 should be retryable")
 	assert.True(t, isRetryable(&downloader.StatusError{StatusCode: 503}), "typed 503 should be retryable")
+	assert.True(t, isRetryable(&downloader.StatusError{StatusCode: 502}), "typed 502 should be retryable")
+	assert.True(t, isRetryable(&downloader.StatusError{StatusCode: 500}), "typed 500 should be retryable")
 	assert.False(t, isRetryable(&downloader.StatusError{StatusCode: 403}), "typed 403 should not be retryable")
+}
+
+func TestPlaylistSlice(t *testing.T) {
+	start, end := playlistSlice(10, 1, 0)
+	assert.Equal(t, 0, start)
+	assert.Equal(t, 10, end)
+
+	start, end = playlistSlice(10, 20, 0)
+	assert.Equal(t, 10, start)
+	assert.Equal(t, 10, end)
+
+	start, end = playlistSlice(10, 5, 3)
+	assert.Equal(t, 4, start)
+	assert.Equal(t, 4, end)
+
+	start, end = playlistSlice(10, 2, 4)
+	assert.Equal(t, 1, start)
+	assert.Equal(t, 4, end)
 }
 
 func TestPlaylistReport(t *testing.T) {

@@ -75,6 +75,8 @@ func TestMapFormat_AudioABR(t *testing.T) {
 	assert.Equal(t, "140", format.FormatID)
 	assert.True(t, format.HasAudio)
 	assert.False(t, format.HasVideo)
+	assert.Equal(t, "mp4a.40.2", format.AudioCodec)
+	assert.Empty(t, format.VideoCodec)
 	assert.InDelta(t, 128.0, format.ABR, 0.01)
 	assert.InDelta(t, 130.0, format.TBR, 0.01)
 
@@ -146,4 +148,15 @@ func TestParseMimeType(t *testing.T) {
 	assert.Equal(t, "mp4", ext)
 	assert.Equal(t, "avc1.64001F", v)
 	assert.Equal(t, "mp4a.40.2", a)
+
+	ext, v, a = parseMimeType(`audio/mp4; codecs="mp4a.40.2"`)
+	assert.Equal(t, "mp4", ext)
+	assert.Equal(t, "", v)
+	assert.Equal(t, "mp4a.40.2", a)
+}
+
+func TestNormalizeUploadDate(t *testing.T) {
+	assert.Equal(t, "20091025", normalizeUploadDate("2009-10-25T00:00:00Z"))
+	assert.Equal(t, "20091025", normalizeUploadDate("2009-10-25"))
+	assert.Equal(t, "20091025", normalizeUploadDate("20091025"))
 }

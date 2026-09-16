@@ -77,8 +77,11 @@ func (a *Archive) Add(id string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 	if _, err := fmt.Fprintln(f, id); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	a.entries[id] = true

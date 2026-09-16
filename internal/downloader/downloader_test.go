@@ -1,6 +1,7 @@
 package downloader
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -133,6 +134,44 @@ func TestParseContentRangeTotal(t *testing.T) {
 	assert.Equal(t, int64(1000), parseContentRangeTotal("bytes 0-499/1000"))
 	assert.Equal(t, int64(12345), parseContentRangeTotal("bytes 100-200/12345"))
 	assert.Equal(t, int64(-1), parseContentRangeTotal("invalid"))
+}
+
+func TestDownloadShortChunkIsError(t *testing.T) {
+	content := bytes.Repeat([]byte("x"), 100)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Range", "bytes 0-999/10000")
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write(content) // short vs advertised range
+	}))
+	defer srv.Close()
+
+	var buf strings.Builder
+	d := New()
+	err := d.Download(context.Background(), srv.URL, &buf)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "short read")
+}
+
+func TestDownloadRejectsHTTP200OnResume(t *testing.T) {
+	content := []byte("Hello, this is test content for downloader!")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	tmpDir := t.TempDir()
+	dest := filepath.Join(tmpDir, "test.txt")
+	require.NoError(t, os.WriteFile(dest, content[:10], 0644))
+
+	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_APPEND, 0644)
+	require.NoError(t, err)
+	defer f.Close()
+
+	d := New()
+	err = d.Download(context.Background(), srv.URL, f)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ignored Range")
 }
 
 // === New resume-system tests ===

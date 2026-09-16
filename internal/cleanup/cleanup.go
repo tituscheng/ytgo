@@ -32,6 +32,20 @@ func (s *Stack) Pop() {
 	s.paths = s.paths[:len(s.paths)-1]
 }
 
+// Remove unregisters path wherever it sits in the stack. Safe for concurrent
+// owners that must not LIFO-pop a sibling's files.
+func (s *Stack) Remove(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := s.paths[:0]
+	for _, p := range s.paths {
+		if p != path {
+			out = append(out, p)
+		}
+	}
+	s.paths = out
+}
+
 // Cleanup removes all registered paths in reverse order (most recent first).
 // It silently ignores files that no longer exist.
 func (s *Stack) Cleanup() {

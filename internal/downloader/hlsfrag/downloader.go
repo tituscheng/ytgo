@@ -88,7 +88,7 @@ func (d *Downloader) downloadPlaylist(
 	playlistURL, destPath string,
 	workers, retries, depth int,
 ) error {
-	plBody, err := d.getWithRetry(ctx, client, playlistURL, retries)
+	plBody, err := d.getWithRetry(ctx, client, Fragment{URL: playlistURL}, retries)
 	if err != nil {
 		return fmt.Errorf("fetch playlist: %w", err)
 	}
@@ -106,6 +106,9 @@ func (d *Downloader) downloadPlaylist(
 		v := pl.BestVariant()
 		if v == nil || v.URL == "" {
 			return fmt.Errorf("master playlist has no usable variants")
+		}
+		if v.AudioGroup != "" && pl.AudioGroups[v.AudioGroup] != "" {
+			return fmt.Errorf("demuxed HLS audio is not supported by hlsfrag")
 		}
 		return d.downloadPlaylist(ctx, client, v.URL, destPath, workers, retries, depth+1)
 	}
@@ -265,7 +268,10 @@ func (d *Downloader) downloadFragments(
 						return nil
 					}
 					ring := i % window
-					data, err := d.getWithRetry(gctx, client, frags[i].URL, retries)
+					data, err := d.getWithRetry(gctx, client, frags[i], retries)
+					if err == nil && len(data) == 0 {
+						err = fmt.Errorf("empty fragment")
+					}
 					// Publish then signal. Writer must not recycle this slot
 					// until it has observed done (and thus these stores).
 					slots[ring].data = data
@@ -386,8 +392,8 @@ func (d *Downloader) httpClient() *http.Client {
 	return transport.NewTunedClient(timeout)
 }
 
-func (d *Downloader) get(ctx context.Context, client *http.Client, rawURL string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+func (d *Downloader) get(ctx context.Context, client *http.Client, frag Fragment) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, frag.URL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -400,20 +406,24 @@ func (d *Downloader) get(ctx context.Context, client *http.Client, rawURL string
 	if req.Header.Get("Accept") == "" {
 		req.Header.Set("Accept", "*/*")
 	}
+	if frag.Length > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", frag.Offset, frag.Offset+frag.Length-1))
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	ok := resp.StatusCode == http.StatusOK || (frag.Length > 0 && resp.StatusCode == http.StatusPartialContent)
+	if !ok {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(body), 120))
 	}
 	return io.ReadAll(resp.Body)
 }
 
-func (d *Downloader) getWithRetry(ctx context.Context, client *http.Client, rawURL string, retries int) ([]byte, error) {
+func (d *Downloader) getWithRetry(ctx context.Context, client *http.Client, frag Fragment, retries int) ([]byte, error) {
 	var last error
 	for attempt := 0; attempt <= retries; attempt++ {
 		if attempt > 0 {
@@ -424,7 +434,7 @@ func (d *Downloader) getWithRetry(ctx context.Context, client *http.Client, rawU
 			case <-time.After(delay):
 			}
 		}
-		data, err := d.get(ctx, client, rawURL)
+		data, err := d.get(ctx, client, frag)
 		if err == nil {
 			return data, nil
 		}

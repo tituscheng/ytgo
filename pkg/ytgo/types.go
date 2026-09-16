@@ -1,7 +1,11 @@
 // Package ytgo provides public types used throughout ytgo.
 package ytgo
 
-import "time"
+import (
+	"encoding/json"
+	"strconv"
+	"time"
+)
 
 // Format represents a single downloadable stream.
 type Format struct {
@@ -173,4 +177,78 @@ type PlaylistReport struct {
 // IsPlaylist returns true if the info represents a playlist.
 func (v *VideoInfo) IsPlaylist() bool {
 	return len(v.Entries) > 0
+}
+
+type videoInfoJSON VideoInfo
+
+type chapterJSON struct {
+	Title     string  `json:"title"`
+	StartTime float64 `json:"start_time"`
+	EndTime   float64 `json:"end_time,omitempty"`
+}
+
+// MarshalJSON writes Duration and chapter times as seconds (yt-dlp-compatible),
+// not time.Duration nanoseconds.
+func (v VideoInfo) MarshalJSON() ([]byte, error) {
+	type wire struct {
+		videoInfoJSON
+		Duration float64       `json:"duration,omitempty"`
+		Chapters []chapterJSON `json:"chapters,omitempty"`
+	}
+	aux := wire{videoInfoJSON: videoInfoJSON(v)}
+	aux.videoInfoJSON.Duration = 0
+	aux.videoInfoJSON.Chapters = nil
+	if v.Duration > 0 {
+		aux.Duration = v.Duration.Seconds()
+	}
+	for _, ch := range v.Chapters {
+		cw := chapterJSON{Title: ch.Title, StartTime: ch.StartTime.Seconds()}
+		if ch.EndTime > 0 {
+			cw.EndTime = ch.EndTime.Seconds()
+		}
+		aux.Chapters = append(aux.Chapters, cw)
+	}
+	return json.Marshal(aux)
+}
+
+func (v *VideoInfo) UnmarshalJSON(data []byte) error {
+	type wire struct {
+		videoInfoJSON
+		Duration json.Number   `json:"duration"`
+		Chapters []chapterJSON `json:"chapters"`
+	}
+	var aux wire
+	aux.videoInfoJSON = videoInfoJSON(*v)
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*v = VideoInfo(aux.videoInfoJSON)
+	if d, err := parseSecondsOrNanos(aux.Duration); err == nil {
+		v.Duration = d
+	}
+	if len(aux.Chapters) > 0 {
+		v.Chapters = make([]Chapter, len(aux.Chapters))
+		for i, ch := range aux.Chapters {
+			v.Chapters[i] = Chapter{
+				Title:     ch.Title,
+				StartTime: time.Duration(ch.StartTime * float64(time.Second)),
+				EndTime:   time.Duration(ch.EndTime * float64(time.Second)),
+			}
+		}
+	}
+	return nil
+}
+
+func parseSecondsOrNanos(n json.Number) (time.Duration, error) {
+	if n == "" {
+		return 0, strconv.ErrSyntax
+	}
+	if f, err := n.Float64(); err == nil {
+		// Values this large are legacy nanosecond encodings.
+		if f > 1e11 {
+			return time.Duration(f), nil
+		}
+		return time.Duration(f * float64(time.Second)), nil
+	}
+	return 0, strconv.ErrSyntax
 }

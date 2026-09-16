@@ -223,9 +223,6 @@ func splitCodecs(codecs string) (video, audio string) {
 	if len(parts) > 1 {
 		audio = strings.TrimSpace(parts[1])
 	}
-	if audio == "" {
-		audio = "aac"
-	}
 	return video, audio
 }
 

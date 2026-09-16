@@ -36,7 +36,8 @@ func isExcludedPath(path, rawQuery string) bool {
 		return true
 	}
 	q, err := url.ParseQuery(rawQuery)
-	if err == nil && q.Get("playlist") != "" {
+	if err == nil && q.Get("playlist") != "" && q.Get("video") == "" &&
+		!dailyVideoPath.MatchString(path) && !dailySwfPath.MatchString(path) {
 		return true
 	}
 	return false
@@ -101,7 +102,7 @@ func isSuitableURL(rawURL string) bool {
 	}
 
 	if strings.EqualFold(u.Hostname(), "geo.dailymotion.com") {
-		return u.Query().Get("video") != "" && u.Query().Get("playlist") == ""
+		return u.Query().Get("video") != ""
 	}
 
 	if dailyVideoPath.MatchString(u.Path) || dailySwfPath.MatchString(u.Path) {

@@ -1,6 +1,10 @@
 package ytgo
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+	"time"
+)
 
 func TestProgressFraction(t *testing.T) {
 	tests := []struct {
@@ -25,5 +29,27 @@ func TestProgressFraction(t *testing.T) {
 				t.Errorf("Fraction() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestVideoInfoDurationJSONSeconds(t *testing.T) {
+	info := VideoInfo{ID: "x", Title: "t", Duration: 3 * time.Minute}
+	data, err := json.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw["duration"] != 180.0 {
+		t.Fatalf("duration = %v, want 180 seconds", raw["duration"])
+	}
+	var back VideoInfo
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Duration != 3*time.Minute {
+		t.Fatalf("round-trip duration = %v", back.Duration)
 	}
 }

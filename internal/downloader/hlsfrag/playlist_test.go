@@ -70,6 +70,29 @@ stream_720.m3u8
 	assert.Equal(t, "https://cdn.example/audio.m3u8", pl.AudioGroups["aac"])
 }
 
+func TestParseMediaPlaylist_ByteRange(t *testing.T) {
+	const doc = `#EXTM3U
+#EXT-X-MAP:URI="main.mp4",BYTERANGE="719@0"
+#EXTINF:3.0,
+#EXT-X-BYTERANGE:1000@719
+main.mp4
+#EXTINF:3.0,
+#EXT-X-BYTERANGE:800@1719
+main.mp4
+#EXT-X-ENDLIST
+`
+	pl, err := ParseMediaPlaylist(strings.NewReader(doc), "https://cdn.example/pl.m3u8")
+	require.NoError(t, err)
+	require.Len(t, pl.Fragments, 3)
+	assert.True(t, pl.Fragments[0].IsInit)
+	assert.Equal(t, int64(0), pl.Fragments[0].Offset)
+	assert.Equal(t, int64(719), pl.Fragments[0].Length)
+	assert.Equal(t, int64(719), pl.Fragments[1].Offset)
+	assert.Equal(t, int64(1000), pl.Fragments[1].Length)
+	assert.Equal(t, int64(1719), pl.Fragments[2].Offset)
+	assert.Equal(t, int64(800), pl.Fragments[2].Length)
+}
+
 func TestParseMediaPlaylist_Encrypted(t *testing.T) {
 	const doc = `#EXTM3U
 #EXT-X-KEY:METHOD=AES-128,URI="key.bin"

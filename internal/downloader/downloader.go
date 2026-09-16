@@ -2,6 +2,7 @@
 package downloader
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,7 +48,11 @@ func (e *StatusError) Unwrap() error {
 		return ErrForbidden
 	case http.StatusTooManyRequests:
 		return ErrRateLimited
-	case http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+	case http.StatusRequestTimeout,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
 		return ErrTransient
 	}
 	return nil
@@ -71,7 +77,8 @@ type Downloader struct {
 // New creates a Downloader with sensible defaults.
 func New() *Downloader {
 	return &Downloader{
-		Client: &http.Client{Timeout: 0}, // no timeout; caller controls via context
+		Client:   &http.Client{Timeout: 0}, // no timeout; caller controls via context
+		Continue: true,
 	}
 }
 
@@ -99,6 +106,8 @@ func (d *Downloader) DownloadToFile(ctx context.Context, url, destPath string) e
 	return sd.DownloadToFile(ctx, url, destPath)
 }
 
+const httpRetryAttempts = 3
+
 // Download fetches url and writes it to the provided writer.
 // It downloads in sequential bounded chunks to avoid YouTube throttling.
 func (d *Downloader) Download(ctx context.Context, url string, w io.Writer) error {
@@ -113,104 +122,176 @@ func (d *Downloader) Download(ctx context.Context, url string, w io.Writer) erro
 	offset := existing
 
 	for {
-		end := offset + chunkSize - 1
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		var data []byte
+		var total int64
+		var done bool
+		err := retryDownload(ctx, func() error {
+			var err error
+			data, total, done, err = d.fetchChunk(ctx, url, offset, chunkSize)
+			return err
+		})
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, end))
-
-		resp, err := d.Client.Do(req)
-		if err != nil {
-			return err
+		if len(data) == 0 {
+			return nil
 		}
-
-		if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
-			resp.Body.Close()
-			break // past EOF, nothing more to download
+		if _, werr := w.Write(data); werr != nil {
+			return fmt.Errorf("write: %w", werr)
 		}
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-			resp.Body.Close()
-			return &StatusError{StatusCode: resp.StatusCode, URL: url}
+		offset += int64(len(data))
+		if d.Progress != nil {
+			d.Progress(offset, total)
 		}
-
-		// Wrap response body with rate limiter if configured
-		body := resp.Body
-		if d.Limiter != nil {
-			body = d.Limiter.ThrottleReader(ctx, resp.Body)
+		if done || int64(len(data)) < chunkSize {
+			return nil
 		}
-
-		var total int64 = -1
-		if cr := resp.Header.Get("Content-Range"); cr != "" {
-			total = parseContentRangeTotal(cr)
-		} else if cl := resp.Header.Get("Content-Length"); cl != "" {
-			if n, _ := strconv.ParseInt(cl, 10, 64); n > 0 {
-				total = offset + n
-			}
-		}
-
-		var buf []byte
-		if d.BufferPool != nil {
-			buf = d.BufferPool.Get().([]byte)
-		} else {
-			buf = make([]byte, 32*1024)
-		}
-
-		var chunkRead int64
-		for {
-			n, err := body.Read(buf)
-			if n > 0 {
-				if _, werr := w.Write(buf[:n]); werr != nil {
-					resp.Body.Close()
-					if d.BufferPool != nil {
-						d.BufferPool.Put(buf)
-					}
-					return fmt.Errorf("write: %w", werr)
-				}
-				offset += int64(n)
-				chunkRead += int64(n)
-				if d.Progress != nil {
-					d.Progress(offset, total)
-				}
-			}
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				resp.Body.Close()
-				if d.BufferPool != nil {
-					d.BufferPool.Put(buf)
-				}
-				return fmt.Errorf("read: %w", err)
-			}
-		}
-
-		resp.Body.Close()
-		if d.BufferPool != nil {
-			d.BufferPool.Put(buf)
-		}
-
-		// If we read less than a full chunk, we're done.
-		if chunkRead < chunkSize {
-			break
+		if total > 0 && offset >= total {
+			return nil
 		}
 	}
-	return nil
+}
+
+// fetchChunk retrieves one bounded Range request into memory so a retry cannot
+// duplicate bytes on a sequential io.Writer.
+func (d *Downloader) fetchChunk(ctx context.Context, url string, offset, chunkSize int64) (data []byte, total int64, last bool, err error) {
+	end := offset + chunkSize - 1
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, -1, false, err
+	}
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, end))
+
+	resp, err := d.Client.Do(req)
+	if err != nil {
+		return nil, -1, false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+		if offset > 0 {
+			return nil, offset, true, nil
+		}
+		return nil, -1, false, &StatusError{StatusCode: resp.StatusCode, URL: url}
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		return nil, -1, false, &StatusError{StatusCode: resp.StatusCode, URL: url}
+	}
+	if resp.StatusCode == http.StatusOK && offset > 0 {
+		return nil, -1, false, fmt.Errorf("server ignored Range (HTTP 200 for bytes=%d-)", offset)
+	}
+
+	total = -1
+	rangeStart, rangeEnd := int64(-1), int64(-1)
+	if cr := resp.Header.Get("Content-Range"); cr != "" {
+		rangeStart, rangeEnd, total = parseContentRange(cr)
+	} else if cl := resp.Header.Get("Content-Length"); cl != "" {
+		if n, err := strconv.ParseInt(cl, 10, 64); err == nil && n > 0 {
+			total = offset + n
+		}
+	}
+
+	body := io.Reader(resp.Body)
+	if d.Limiter != nil {
+		body = d.Limiter.ThrottleReader(ctx, resp.Body)
+	}
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, body); err != nil {
+		return nil, total, false, fmt.Errorf("read: %w", err)
+	}
+	data = buf.Bytes()
+	got := int64(len(data))
+	if got == 0 {
+		return data, total, true, nil
+	}
+
+	want := chunkSize
+	if total > 0 && offset+want > total {
+		want = total - offset
+	}
+	if resp.StatusCode == http.StatusPartialContent && rangeEnd >= rangeStart && rangeStart >= 0 {
+		want = rangeEnd - rangeStart + 1
+	}
+
+	if got < want {
+		if total > 0 && offset+got >= total {
+			return data, total, true, nil
+		}
+		if resp.StatusCode == http.StatusOK && (total <= 0 || offset+got >= total) {
+			return data, total, true, nil
+		}
+		return nil, total, false, fmt.Errorf("short read: got %d want %d bytes (bytes=%d-%d)", got, want, offset, end)
+	}
+	last = total > 0 && offset+got >= total
+	if resp.StatusCode == http.StatusOK {
+		last = true
+	}
+	return data, total, last, nil
+}
+
+func retryDownload(ctx context.Context, fn func() error) error {
+	var last error
+	for attempt := 1; attempt <= httpRetryAttempts; attempt++ {
+		last = fn()
+		if last == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if attempt == httpRetryAttempts || !isRetryableDownload(last) {
+			return last
+		}
+		delay := time.Duration(attempt) * 400 * time.Millisecond
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+	return last
+}
+
+func isRetryableDownload(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrRateLimited) || errors.Is(err, ErrTransient) {
+		return true
+	}
+	if isTransientStreamError(err) {
+		return true
+	}
+	return strings.Contains(err.Error(), "short read")
+}
+
+func parseContentRange(cr string) (start, end, total int64) {
+	start, end, total = -1, -1, -1
+	cr = strings.TrimSpace(cr)
+	cr = strings.TrimPrefix(cr, "bytes")
+	cr = strings.TrimSpace(cr)
+	dash := strings.Index(cr, "-")
+	if dash < 0 {
+		return
+	}
+	start, _ = strconv.ParseInt(strings.TrimSpace(cr[:dash]), 10, 64)
+	rest := cr[dash+1:]
+	if slash := strings.LastIndex(rest, "/"); slash >= 0 {
+		end, _ = strconv.ParseInt(strings.TrimSpace(rest[:slash]), 10, 64)
+		tot := strings.TrimSpace(rest[slash+1:])
+		if tot != "*" {
+			total, _ = strconv.ParseInt(tot, 10, 64)
+		}
+		return
+	}
+	end, _ = strconv.ParseInt(strings.TrimSpace(rest), 10, 64)
+	return
 }
 
 func parseContentRangeTotal(cr string) int64 {
-	// bytes 1000-2000/3000 — find the total after the last slash.
-	parts := []rune(cr)
-	for i := len(parts) - 1; i >= 0; i-- {
-		if parts[i] == '/' {
-			if n, err := strconv.ParseInt(string(parts[i+1:]), 10, 64); err == nil {
-				return n
-			}
-			break
-		}
-	}
-	return -1
+	_, _, total := parseContentRange(cr)
+	return total
 }
 
 // IsResumable checks whether the server supports Range requests.

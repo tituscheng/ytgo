@@ -4,6 +4,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/tituscheng/ytgo/internal/config"
@@ -28,8 +29,14 @@ func Download(ctx context.Context, url string, opts DownloadOptions) error {
 	for _, ext := range extractors.Default(opts.SocketTimeout, opts.EnrichMetadata) {
 		engine.Register(ext)
 	}
-	_, err := engine.Run(ctx, url)
-	return err
+	report, err := engine.Run(ctx, url)
+	if err != nil {
+		return err
+	}
+	if report != nil && len(report.Failed) > 0 {
+		return fmt.Errorf("playlist: %d of %d items failed", len(report.Failed), report.Total)
+	}
+	return nil
 }
 
 // ExtractOptions configures metadata extraction without downloading.
@@ -112,11 +119,45 @@ func GetStreamURL(ctx context.Context, opts GetStreamOptions) (*StreamResult, er
 		return nil, fmt.Errorf("no formats matched selector: %s", opts.Format)
 	}
 
+	chosen := formats[0]
+	if !chosen.HasAudio && !videoOnlySelector(opts.Format) {
+		if comb := bestCombined(info.Formats); comb != nil {
+			chosen = *comb
+		}
+	}
+
 	return &StreamResult{
-		URL:       formats[0].URL,
-		Format:    formats[0],
+		URL:       chosen.URL,
+		Format:    chosen,
 		VideoInfo: info,
 	}, nil
+}
+
+func videoOnlySelector(sel string) bool {
+	s := strings.ToLower(strings.TrimSpace(sel))
+	if strings.ContainsAny(s, "+/") {
+		return false
+	}
+	s = strings.TrimSuffix(s, "*")
+	switch s {
+	case "bv", "bestvideo", "wv", "worstvideo":
+		return true
+	}
+	return strings.HasPrefix(s, "bestvideo")
+}
+
+func bestCombined(formats []ytgo.Format) *ytgo.Format {
+	var best *ytgo.Format
+	for i := range formats {
+		f := &formats[i]
+		if !f.HasVideo || !f.HasAudio {
+			continue
+		}
+		if best == nil || f.Height > best.Height || (f.Height == best.Height && f.Filesize > best.Filesize) {
+			best = f
+		}
+	}
+	return best
 }
 
 func findExtractor(rawURL string, timeout time.Duration, enrich bool) extractor.InfoExtractor {

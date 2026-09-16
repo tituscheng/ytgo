@@ -39,6 +39,7 @@ func NewSegmentDownloader(client *http.Client) *SegmentDownloader {
 		Workers:      4,
 		ChunkSize:    5 * 1024 * 1024,
 		MaxChunkSize: defaultChunkSize,
+		Continue:     true,
 	}
 }
 
@@ -47,6 +48,10 @@ func NewSegmentDownloader(client *http.Client) *SegmentDownloader {
 func (sd *SegmentDownloader) DownloadToFile(ctx context.Context, url, destPath string) error {
 	if sd.Workers < 1 {
 		sd.Workers = 1
+	}
+	if !sd.Continue {
+		_ = os.Remove(destPath)
+		_ = os.Remove(resumePath(destPath))
 	}
 	// Probe server capabilities
 	totalSize, supportsRange, err := sd.probe(ctx, url)
@@ -59,12 +64,6 @@ func (sd *SegmentDownloader) DownloadToFile(ctx context.Context, url, destPath s
 	segments := PlanSegments(totalSize, sd.Workers, sd.ChunkSize, sd.MaxChunkSize)
 	if len(segments) <= 1 {
 		return sd.fallback(ctx, url, destPath)
-	}
-
-	// Handle --no-continue: wipe any partial state and start fresh
-	if !sd.Continue {
-		_ = os.Remove(destPath)
-		_ = os.Remove(resumePath(destPath))
 	}
 
 	// Load or create resume state
@@ -183,20 +182,20 @@ func (sd *SegmentDownloader) DownloadToFile(ctx context.Context, url, destPath s
 		// so context cancellation never blocks the launch loop (mirrors
 		// pipeline.WorkerPool.Submit).
 		sem := make(chan struct{}, sd.Workers)
-		var eg errgroup.Group
+		eg, egctx := errgroup.WithContext(ctx)
 		var completedMu sync.Mutex
 
 	launch:
 		for _, seg := range missing {
 			seg := seg
 			select {
-			case <-ctx.Done():
+			case <-egctx.Done():
 				break launch
 			case sem <- struct{}{}:
 			}
 			eg.Go(func() error {
 				defer func() { <-sem }()
-				if err := sd.fetchSegment(ctx, url, seg, fd, &downloaded); err != nil {
+				if err := sd.fetchSegment(egctx, url, seg, fd, &downloaded); err != nil {
 					return err
 				}
 				completedMu.Lock()
@@ -263,6 +262,12 @@ func (sd *SegmentDownloader) probe(ctx context.Context, url string) (int64, bool
 // That produced valid-looking files that later failed FFmpeg merge with
 // "moov atom not found".
 func (sd *SegmentDownloader) fetchSegment(ctx context.Context, url string, seg ByteRange, fd *os.File, downloaded *atomic.Int64) error {
+	return retryDownload(ctx, func() error {
+		return sd.fetchSegmentOnce(ctx, url, seg, fd, downloaded)
+	})
+}
+
+func (sd *SegmentDownloader) fetchSegmentOnce(ctx context.Context, url string, seg ByteRange, fd *os.File, downloaded *atomic.Int64) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -315,6 +320,7 @@ func (sd *SegmentDownloader) fetchSegment(ctx context.Context, url string, seg B
 			}
 			if n > 0 {
 				if _, werr := fd.WriteAt(buf[:n], offset); werr != nil {
+					downloaded.Add(-got)
 					return fmt.Errorf("writeat %d: %w", offset, werr)
 				}
 				offset += int64(n)
@@ -332,10 +338,12 @@ func (sd *SegmentDownloader) fetchSegment(ctx context.Context, url string, seg B
 			break
 		}
 		if err != nil {
+			downloaded.Add(-got)
 			return fmt.Errorf("read: %w", err)
 		}
 	}
 	if got != want {
+		downloaded.Add(-got)
 		return fmt.Errorf("segment %d short read: got %d want %d bytes (%s)", seg.Index, got, want, seg.String())
 	}
 	return nil
@@ -347,6 +355,12 @@ func (sd *SegmentDownloader) fetchSegment(ctx context.Context, url string, seg B
 func (sd *SegmentDownloader) fallback(ctx context.Context, url, destPath string) error {
 	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 		return fmt.Errorf("create dir: %w", err)
+	}
+	// A leftover .segments sidecar means dest was preallocated for pwrite and
+	// may be a sparse hole-file. Sequential append cannot resume that.
+	if _, err := os.Stat(resumePath(destPath)); err == nil {
+		_ = os.Remove(destPath)
+		_ = os.Remove(resumePath(destPath))
 	}
 	file, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {

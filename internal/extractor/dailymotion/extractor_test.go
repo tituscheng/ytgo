@@ -64,6 +64,16 @@ func TestSuitable(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "video page with playlist query",
+			url:  "https://www.dailymotion.com/video/x5kesuj?playlist=xv4bw",
+			want: true,
+		},
+		{
+			name: "geo player video and playlist",
+			url:  "https://geo.dailymotion.com/player/x86gw.html?video=x89eyek&playlist=xv4bw",
+			want: true,
+		},
+		{
 			name: "user page",
 			url:  "https://www.dailymotion.com/user/nqtv",
 			want: false,
